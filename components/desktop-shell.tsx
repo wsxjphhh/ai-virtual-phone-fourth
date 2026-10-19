@@ -3836,7 +3836,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     wallpaperDataUrl,
   ]);
 
-  // ── 退出 App 的「正在返回桌面」遮罩 ──────────────────────────────
+  // ── 「正在返回…」遮罩（退出 App 与应用内返回共用）──────────────────
   // 真机 WebView 上退出可能要等上几秒（开发机只有几十毫秒，量级差在设备上），
   // 没有反馈时用户无法区分「在加载」和「卡死了」。
   // 关键：遮罩必须在 React 那次重提交之前就交给合成器，否则主线程被占住时它自己
@@ -5043,10 +5043,15 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     );
                   })}
               </footer>
-              {/* 退出 App 时的等待遮罩：只有卡到 220ms 以上才会淡入（见上方逻辑注释） */}
+              {/* 退出 App 时的等待遮罩：只有卡到 220ms 以上才会淡入（见上方逻辑注释）。
+                  文案用中性的「正在返回…」而不是「正在返回桌面…」：CLOSE_SEL 匹配的是
+                  .page-back-btn / [aria-label=返回|关闭]，这些在选择器里分不清"退回桌面"和
+                  "应用内返回"。第三份真机日志（2026-10-19 07-15-54）15 次命中里只有 1 次真的
+                  退到了桌面，其余 14 次是特调里"对局→大厅"这类应用内返回，其中 2 次遮罩确实
+                  显形了（637ms、700ms）—— 那时告诉用户"正在返回桌面"是假话。 */}
               <div ref={exitVeilRef} className="app-exit-veil" aria-hidden="true">
                 <span className="app-exit-veil-spin" />
-                <span>正在返回桌面…</span>
+                <span>正在返回…</span>
               </div>
               <PerfProbePanel />
               <DebugPromptPanel />

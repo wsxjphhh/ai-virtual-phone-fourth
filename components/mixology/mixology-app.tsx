@@ -47,6 +47,8 @@ import {
     type MixProfile,
 } from "@/lib/mixology/storage";
 import { mixRoundCount, runMixSessionStart, startMixSession } from "@/lib/mixology/engine";
+// 临时诊断（拆 perf-probe 时连同下方 playing 副作用一起删）
+import { perfProbeMark } from "@/lib/perf-probe";
 import { disposeMixSandboxesForMaterial } from "@/lib/mixology/mechanism-runtime";
 import { mixKindRunsActiveCode, MIX_SLOT_STACK } from "@/lib/mixology/types";
 import {
@@ -213,6 +215,16 @@ export function MixologyApp({ onClose }: { onClose: () => void }) {
     const [recipeName, setRecipeName] = useState("");
     const [openingPicker, setOpeningPicker] = useState<MixRecipe | null>(null);
     const [playing, setPlaying] = useState<string | null>(null);
+    /**
+     * 临时诊断：记录"对局 ↔ 大厅"这一步。第三份真机日志（2026-10-19 07-15-54）里
+     * 15 次 close-tap 只有 1 次真的退回桌面（app-change 到 null 只有 1 条），其余 14 次
+     * 是 MixologyGame 顶栏那颗 `aria-label="返回"` —— 它同样命中桌面壳的 CLOSE_SEL，
+     * 于是日志里"退出卡顿"和"应用内返回卡顿"长得一模一样，分不清在修哪个。
+     * 拆探针时连同上面那行 perf-probe 的 import 一起删掉。
+     */
+    useEffect(() => {
+        perfProbeMark("app-change", { app: "mixology", d: { phase: playing ? "对局" : "大厅", id: playing ?? undefined } });
+    }, [playing]);
     const [toast, setToast] = useState("");
     const [wheelIndex, setWheelIndex] = useState(0);
     const wheelRef = useRef<HTMLDivElement | null>(null);
