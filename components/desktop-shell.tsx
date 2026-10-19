@@ -4580,8 +4580,20 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
 
 
-                {!activeApp ? (
-                  <>
+                {/*
+                  桌面常驻挂载（原为 !activeApp 条件渲染）。
+                  实测（2026-10-19，真实数据：27 图标 + 组件 + 4 Dock，主题库 62.6MB）：
+                  退出 App 时桌面整棵树卸载重建会产生两条背靠背长任务
+                  —— 291~308ms 的 React 重挂 + 245~289ms 的首帧栅格化，合计 540~600ms，
+                  且与「是哪个 App」无关（聊天 / 独家特调 数字一致）。
+                  改为常驻后由 .phone-desktop-layer 的 CSS 负责隐藏，React 重挂这条整条消失。
+                  详见 docs/改动记录.md「2026-10-19 · 退出 App 卡顿」。
+                */}
+                <div
+                  className="phone-desktop-layer"
+                  inert={activeApp ? true : undefined}
+                  aria-hidden={activeApp ? true : undefined}
+                >
                     <div
                       ref={swipeLayerRef}
                       className="phone-swipe-layer"
@@ -4783,8 +4795,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                         />
                       ))}
                     </div>
-                  </>
-                ) : (
+                </div>
+                {activeApp ? (
                   <>
                     <section className="phone-app-pane" style={activeApp === "dwelling" || activeApp === "xiaohongshu" || activeApp === "shopping" ? { display: "none" } : undefined}>
                       {renderAppBody()}
@@ -4800,7 +4812,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       </section>
                     )}
                   </>
-                )}
+                ) : null}
                 {xiaohongshuMounted && (
                   <section className="phone-app-pane" style={activeApp !== "xiaohongshu" ? { display: "none" } : undefined}>
                     <XiaohongshuApp
@@ -4834,10 +4846,12 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
               </div>
 
-              {!activeApp ? (
-                <footer
+              {/* Dock 同样常驻挂载，App 打开时由 CSS 隐藏，见上方 .phone-desktop-layer 说明 */}
+              <footer
                   ref={dockElRef}
                   className={editMode ? "dock edit-mode" : "dock"}
+                  inert={activeApp ? true : undefined}
+                  aria-hidden={activeApp ? true : undefined}
                   {...(dockSkinUrl ? { "data-skinned": "" } : {})}
                   style={{ "--dock-count": Math.max(1, dock.length) } as CSSProperties}
                   onPointerMove={handleSwipeMove}
@@ -4902,8 +4916,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       </button>
                     );
                   })}
-                </footer>
-              ) : null}
+              </footer>
               <DebugPromptPanel />
               <QuickActionFloat />
               <FloatingControlDock activeApp={activeApp} />
