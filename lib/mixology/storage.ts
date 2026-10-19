@@ -78,12 +78,55 @@ export function getMixBuiltin(id: string): MixMaterial | null {
     return listMixBuiltins().find((m) => m.id === id) ?? null;
 }
 
+/**
+ * JSON 读取备忘（raw 串 → 已 parse 的对象）
+ *
+ * 为什么要它：`mixology_sessions_v1` 整包 14MB（实测 31 场对局、14267kb），
+ * 而 `getMixSession()` 是 `loadMixSessions()` 的 find，等于每次取一场对局都要把
+ * 14MB 整串 parse 一遍。实测（dev 页、同一条数据、JSON.parse 挂钩计数）：
+ * 进一场**只有 1 轮**的对局，一个同步任务里 parse 了 22 次、共 756ms，整段长任务 818ms；
+ * 193 轮那场 parse 14 次共 958ms，长任务 3863ms。轮数无关的那 ~750ms 全是重复解析，
+ * 真机 WebView 上还要再放大数倍——这就是"打开特调对局卡好几秒"的固定地板。
+ *
+ * 失效口径（刻意做窄，不赌调用方不改对象）：
+ * 1. 命中要求 `hit.raw === kvGet(key)`——kv-db 的内存缓存在被覆写前返回同一个字符串引用，
+ *    所以备份导入等"从外面写这个 key"的路径会让引用变化，自动落回重新 parse；
+ * 2. `writeJson` 写完立即删除条目：本模块内存里的对象可能正是缓存里那一份，
+ *    调用方先改再写、或改了没写，都不该让缓存和磁盘对不上号；
+ * 3. 交给调用方的一律是**新数组 / 新顶层对象**（`freshCopy`），缓存里那份永不外流：
+ *    `loadMixSessions` 本来就 `.map` 出新的对局对象，`setSession(getMixSession(id))`
+ *    依赖"每次拿到新引用"才会重渲染，这里不能省。
+ *
+ * 共享的只有更深层（turns 数组、state、mechanismStore 的引用）。全仓 grep 过：
+ * 对局写路径清一色 `{ ...session, turns }` / `turns.slice()`，唯一的 `turns.push`
+ * 在 engine.ts:264，对象是当场新建的、不来自缓存。
+ */
+const jsonMemo = new Map<string, { raw: string; value: unknown }>();
+const JSON_MEMO_MAX = 8;
+
+function freshCopy<T>(value: T): T {
+    if (Array.isArray(value)) return value.slice() as unknown as T;
+    if (value && typeof value === "object") return { ...(value as object) } as T;
+    return value;
+}
+
 function readJson<T>(key: string, fallback: T): T {
     const raw = kvGet(key);
-    if (!raw) return fallback;
+    if (!raw) {
+        jsonMemo.delete(key);
+        return fallback;
+    }
+    const hit = jsonMemo.get(key);
+    if (hit && hit.raw === raw) return freshCopy(hit.value as T);
     try {
-        const parsed = JSON.parse(raw);
-        return (parsed ?? fallback) as T;
+        const parsed = (JSON.parse(raw) ?? fallback) as T;
+        // 超出上限时按插入顺序丢最旧的（Map 迭代顺序即插入顺序）
+        if (jsonMemo.size >= JSON_MEMO_MAX && !jsonMemo.has(key)) {
+            const oldest = jsonMemo.keys().next().value as string | undefined;
+            if (oldest !== undefined) jsonMemo.delete(oldest);
+        }
+        jsonMemo.set(key, { raw, value: parsed });
+        return freshCopy(parsed);
     } catch {
         return fallback;
     }
@@ -91,6 +134,7 @@ function readJson<T>(key: string, fallback: T): T {
 
 function writeJson(key: string, value: unknown): void {
     kvSet(key, JSON.stringify(value));
+    jsonMemo.delete(key);
 }
 
 // ---------- 创作者资料 ----------
