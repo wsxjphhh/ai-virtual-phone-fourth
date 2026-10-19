@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { Component, memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
 
 import { updateStatusBarTone } from "@/lib/bg-tone";
+import { perfProbeMark, startPerfProbe } from "@/lib/perf-probe";
 import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/diary-entry-timer-service";
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
@@ -38,6 +39,8 @@ const ResourceHubApp = dynamic(() => import("@/components/resource-hub/resource-
 const RealityBridgeApp = dynamic(() => import("@/components/reality-bridge-app").then((m) => m.RealityBridgeApp), { ssr: false });
 const DiaryApp = dynamic(() => import("@/components/diary/diary-app").then((m) => m.DiaryApp), { ssr: false });
 const XiaohongshuApp = dynamic(() => import("@/components/xiaohongshu/xiaohongshu-app").then((m) => m.XiaohongshuApp), { ssr: false });
+// 临时诊断件：真机性能日志面板，用完连 lib/perf-probe.ts 一起删
+const PerfProbePanel = dynamic(() => import("@/components/perf-probe-panel").then((m) => m.default), { ssr: false });
 const StoryApp = dynamic(() => import("@/components/story/story-app").then((m) => m.StoryApp), { ssr: false });
 const VnApp = dynamic(() => import("@/components/vn/vn-app").then((m) => m.VnApp), { ssr: false });
 const ReadingApp = dynamic(() => import("@/components/reading/reading-app"), { ssr: false });
@@ -1153,6 +1156,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [draftTheme, setDraftTheme] = useState<ThemeProfile>(() => initialThemeProfile ?? readInitialThemeProfile());
   useEffect(() => {
     activeAppRef.current = activeApp;
+    // 临时诊断：记录 App 切换真正提交的那一刻（配合下面的 close-tap 时间点算耗时）
+    perfProbeMark("app-change", { app: activeApp });
   }, [activeApp]);
   // Listen for theme CSS updates from 小卷
   useEffect(() => {
@@ -3831,6 +3836,94 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     wallpaperDataUrl,
   ]);
 
+  // ── 退出 App 的「正在返回桌面」遮罩 ──────────────────────────────
+  // 真机 WebView 上退出可能要等上几秒（开发机只有几十毫秒，量级差在设备上），
+  // 没有反馈时用户无法区分「在加载」和「卡死了」。
+  // 关键：遮罩必须在 React 那次重提交之前就交给合成器，否则主线程被占住时它自己
+  // 也画不出来。所以在 pointerdown 的捕获阶段挂 class（React 的 onClick 要等到
+  // pointerup 之后才跑，中间至少隔一帧），再用 CSS transition-delay 让它 220ms
+  // 后才显形 —— 透明度动画跑在合成器线程，主线程卡住也照样淡入；快的设备一帧就
+  // 画完桌面，遮罩来不及出现，不会闪。
+  const exitVeilRef = useRef<HTMLDivElement | null>(null);
+  const exitPendingRef = useRef<{ at: number; app: DesktopIconId | null } | null>(null);
+
+  const finishExitVeil = useCallback((measured: boolean) => {
+    const pending = exitPendingRef.current;
+    exitPendingRef.current = null;
+    exitVeilRef.current?.classList.remove("is-on");
+    if (pending && measured) {
+      // 带上 hidden：页面在后台时 rAF 不触发、定时器被钳到 1s，这个耗时不可信
+      perfProbeMark("exit-overlay", {
+        app: pending.app,
+        ms: Math.round(performance.now() - pending.at),
+        d: { hidden: document.hidden },
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    startPerfProbe();
+  }, []);
+
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const CLOSE_SEL = ".page-back-btn, [aria-label='返回'], [aria-label='关闭'], .custom-app-runner-capsule .cap-btn";
+    const onDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest?.(".phone-app-pane") || !target.closest?.(CLOSE_SEL)) return;
+      exitPendingRef.current = { at: performance.now(), app: activeAppRef.current };
+      exitVeilRef.current?.classList.add("is-on");
+      perfProbeMark("app-change", { app: activeAppRef.current, d: { phase: "close-tap" } });
+    };
+    const onUp = () => {
+      // 按下后没真的触发返回（手指滑开了）→ 别把遮罩留在那儿
+      window.setTimeout(() => { if (activeAppRef.current) finishExitVeil(false); }, 500);
+    };
+    // 遮罩真的显形了没有？这一步由合成器完成，主线程卡住时理论上仍会淡入，
+    // 但那正是需要在真机上证实的假设 —— 用 transitionend 留下硬证据。
+    const veil = exitVeilRef.current;
+    const onVeilShown = (event: TransitionEvent) => {
+      if (event.propertyName !== "opacity") return;
+      if (!veil?.classList.contains("is-on")) return;
+      const pending = exitPendingRef.current;
+      perfProbeMark("note", {
+        app: pending?.app ?? activeAppRef.current,
+        ms: pending ? Math.round(performance.now() - pending.at) : undefined,
+        d: { msg: "veil-painted", hidden: document.hidden },
+      });
+    };
+    shell.addEventListener("pointerdown", onDown, true);
+    shell.addEventListener("pointerup", onUp, true);
+    shell.addEventListener("pointercancel", onUp, true);
+    veil?.addEventListener("transitionend", onVeilShown);
+    return () => {
+      shell.removeEventListener("pointerdown", onDown, true);
+      shell.removeEventListener("pointerup", onUp, true);
+      shell.removeEventListener("pointercancel", onUp, true);
+      veil?.removeEventListener("transitionend", onVeilShown);
+    };
+  }, [finishExitVeil]);
+
+  useEffect(() => {
+    if (activeApp) {
+      // 又进了别的 App：直接收掉遮罩，别把它留在桌面上
+      finishExitVeil(false);
+      return;
+    }
+    if (!exitPendingRef.current) return;
+    // 两帧之后再收：第一帧是 React 提交后的首次绘制，第二帧才说明桌面真的画出来了。
+    // 同时挂一个定时器兜底 —— 页面切到后台时 rAF 根本不触发，只等 rAF 会把遮罩
+    // 永久留在屏幕上（实测踩过）。finishExitVeil 幂等，谁先到谁生效。
+    requestAnimationFrame(() => requestAnimationFrame(() => finishExitVeil(true)));
+    const fallback = window.setTimeout(() => finishExitVeil(true), 400);
+    const safety = window.setTimeout(() => finishExitVeil(true), 10_000);
+    return () => {
+      window.clearTimeout(fallback);
+      window.clearTimeout(safety);
+    };
+  }, [activeApp, finishExitVeil]);
+
   const handleSwipeMove = useCallback((e: React.PointerEvent) => {
     // ── Long-press cancellation ──
     const lp = longPressRef.current;
@@ -4917,6 +5010,12 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     );
                   })}
               </footer>
+              {/* 退出 App 时的等待遮罩：只有卡到 220ms 以上才会淡入（见上方逻辑注释） */}
+              <div ref={exitVeilRef} className="app-exit-veil" aria-hidden="true">
+                <span className="app-exit-veil-spin" />
+                <span>正在返回桌面…</span>
+              </div>
+              <PerfProbePanel />
               <DebugPromptPanel />
               <QuickActionFloat />
               <FloatingControlDock activeApp={activeApp} />
