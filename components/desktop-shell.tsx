@@ -2511,27 +2511,28 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     return () => window.removeEventListener("open-mini-chat", handler);
   }, []);
 
-  // 聊天小窗归坞管理：勾选 = 坞按钮可开合，取消勾选 = 小窗彻底隐藏（已打开的也强制关掉）
-  const miniChatInDock = useSyncExternalStore(
+  // 聊天小窗吃"可使用"这一维：可用 = 小窗能开（常驻与否只决定坞条上有没有按钮，
+  // 不常驻的从坞底「更多」进来）；停用 = 小窗彻底隐藏（已打开的也强制关掉）
+  const miniChatEnabled = useSyncExternalStore(
     subscribeControlDockState,
-    () => getControlDockState().pinned["mini-chat"] !== false,
+    () => getControlDockState().enabled["mini-chat"] !== false,
     () => true,
   );
   useEffect(() => {
-    if (!miniChatInDock) setShowMiniChat(false);
-  }, [miniChatInDock]);
+    if (!miniChatEnabled) setShowMiniChat(false);
+  }, [miniChatEnabled]);
 
-  // 受统一控制坞驱动：坞里点「聊天小窗」时切换迷你聊天窗开合
+  // 受统一控制坞驱动：坞里（或「更多」列表里）点「聊天小窗」时切换迷你聊天窗开合
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ control?: string }>).detail;
       if (detail?.control !== "mini-chat") return;
-      if (!miniChatInDock) return;
+      if (!miniChatEnabled) return;
       setShowMiniChat(prev => !prev);
     };
     window.addEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
     return () => window.removeEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
-  }, [miniChatInDock]);
+  }, [miniChatEnabled]);
 
   const openChatSessionFromNotice = useCallback((sessionId: string) => {
     if (chatMessageNoticeTimerRef.current !== null) {
@@ -4625,7 +4626,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               {/* Mini chat window — persists across music pages */}
               <MiniAppWindow
                 title="聊天"
-                visible={showMiniChat && miniChatInDock}
+                visible={showMiniChat && miniChatEnabled}
                 onClose={handleMiniChatClose}
                 onExpand={handleMiniChatExpand}
               >

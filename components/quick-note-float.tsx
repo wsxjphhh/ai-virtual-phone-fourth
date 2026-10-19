@@ -75,8 +75,9 @@ export function QuickNoteFloat() {
     const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
     const resizeRef = useRef<{ sx: number; sy: number; ow: number; oh: number } | null>(null);
 
+    // 随记小窗吃"可使用"：停用 = 小窗彻底不出现；只关常驻显示 = 小窗照常，坞按钮收进「更多」
     const controlDockState = useSyncExternalStore(subscribeControlDockState, getControlDockState, getControlDockState);
-    const managed = controlDockState.pinned[CONTROL_ID] !== false;
+    const noteEnabled = controlDockState.enabled[CONTROL_ID] !== false;
 
     // 首次挂载再读持久化位置（SSR 安全）
     useEffect(() => { setRect(loadRect()); }, []);
@@ -238,7 +239,7 @@ export function QuickNoteFloat() {
         window.setTimeout(() => setBusy(""), 1600);
     };
 
-    if (!managed || !open) return null;
+    if (!noteEnabled || !open) return null;
 
     return (
         <div

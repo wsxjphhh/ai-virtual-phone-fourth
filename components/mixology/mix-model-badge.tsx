@@ -94,9 +94,10 @@ export function MixModelBadge() {
         return () => window.removeEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
     }, []);
 
-    // 必须走订阅态，否则在坞里勾上时不会实时出现
+    // 必须走订阅态，否则开关变化时不会实时刷新。这里吃"可使用"：停用才彻底不出现，
+    // 只关常驻显示的话徽章照常挂着，入口收进坞底「更多」
     const controlDockState = useSyncExternalStore(subscribeControlDockState, getControlDockState, getControlDockState);
-    const managed = controlDockState.pinned["mix-model-badge"] !== false;
+    const badgeEnabled = controlDockState.enabled["mix-model-badge"] !== false;
 
     const persistPos = (next: { x: number; y: number }) => {
         try {
@@ -130,7 +131,7 @@ export function MixModelBadge() {
         window.addEventListener("pointerup", up);
     };
 
-    if (!managed || userHidden) return null;
+    if (!badgeEnabled || userHidden) return null;
 
     const config = resolved?.config ?? null;
     const source = resolved?.source ?? "none";

@@ -129,7 +129,7 @@ export function MixSessionTree({ sessionId, onSwitch, onToast }: Props) {
         getMixSessionRuntimeState,
         getMixSessionRuntimeState,
     );
-    // 已被统一控制坞接管：自身悬浮按钮永久收起，改由坞按钮触发开合
+    // 已由统一控制坞接管：自身悬浮按钮收起，入口是坞按钮（常驻）或坞底「更多」列表项
     const managedMixTree = isDockManaged("mix-tree");
 
     // 受统一控制坞驱动：坞里点「世界树」时切换本面板开合

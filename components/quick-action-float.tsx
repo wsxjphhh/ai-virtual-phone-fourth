@@ -51,7 +51,7 @@ import type { Character } from "@/lib/character-types";
 
 type QuickScope = "global" | "character";
 type FloatingPosition = { left: number; top: number };
-type PopoverPosition = { left: number; top: number };
+type PopoverPosition = { left: number; top: number; width?: number };
 type FloatingDragState = {
     pointerId: number;
     startClientX: number;
@@ -104,9 +104,12 @@ export function QuickActionFloat() {
     const [promptViewerEnabled, setPromptViewerEnabled] = useState(false);
     const dockState = useSyncExternalStore(subscribeFloatingDockState, getFloatingDockState, getFloatingDockState);
     const controlDockState = useSyncExternalStore(subscribeControlDockState, getControlDockState, getControlDockState);
-    // 已被统一控制坞接管：自身悬浮球永久收起，改由坞按钮触发开合
-    // （取消勾选只会让它从坞里消失，绝不能退回自由悬浮状态）
+    // 已由统一控制坞接管：自身悬浮球收起，入口只有坞按钮（常驻显示）或坞底「更多」列表项
+    // （关掉"常驻显示"不会退回自由悬浮，功能仍可从「更多」点开）
     const managedQuick = isDockManaged("quick-action");
+    // 入口是否活着：坞的「可使用」开着就照常工作，不再被手机设置里那个旧开关单独掐死
+    // （快捷切换已被坞接管，坞是它唯一入口；设置里关掉会连带把坞的可用一起关掉，见 phone-settings-app）
+    const active = enabled || controlDockState.enabled["quick-action"] !== false;
     const layerRef = useRef<HTMLDivElement | null>(null);
     const floatingButtonRef = useRef<HTMLButtonElement | null>(null);
     const floatingDragRef = useRef<FloatingDragState | null>(null);
@@ -151,7 +154,7 @@ export function QuickActionFloat() {
     }, []);
 
     useEffect(() => {
-        if (!enabled) return;
+        if (!active) return;
         reloadData();
         const handleBindingsUpdated = () => reloadData();
         const handleFocus = () => reloadData();
@@ -161,7 +164,7 @@ export function QuickActionFloat() {
             window.removeEventListener("settings-bindings-updated", handleBindingsUpdated);
             window.removeEventListener("focus", handleFocus);
         };
-    }, [enabled, reloadData]);
+    }, [active, reloadData]);
 
     // 受统一控制坞驱动：坞里点「快捷切换」时切换本面板开合
     useEffect(() => {
@@ -231,7 +234,7 @@ export function QuickActionFloat() {
         apply();
         window.addEventListener("resize", apply);
         return () => window.removeEventListener("resize", apply);
-    }, [floatingDockEnabled, enabled]);
+    }, [floatingDockEnabled, active]);
 
     useLayoutEffect(() => {
         const layer = layerRef.current;
@@ -256,14 +259,43 @@ export function QuickActionFloat() {
         const width = Math.min(344, rect.width - 32);
         const statusSafeTop = getStatusSafeTop(layer);
         const estimatedHeight = Math.min(520, Math.max(240, rect.height - statusSafeTop - 12));
-        const left = posAnchor.left - width - 8;
+        let panelWidth = width;
+        let left = posAnchor.left - width - 8;
+        // 受控模式下面板绝不能压在控制坞上：横向挪到坞条的另一侧，
+        // 剩余空间放不下 344 就缩面板宽度（手机壳只有 390 宽，46 的坞条会吃掉一边）。
+        // 自由悬浮球模式下仍按球的位置弹，不受坞影响。
+        const dockEl = dockAnchor ? document.querySelector<HTMLElement>(".fcd-dock") : null;
+        if (dockEl) {
+            const dockRect = dockEl.getBoundingClientRect();
+            const dockLeft = dockRect.left - rect.left;
+            const dockRight = dockRect.right - rect.left;
+            const dockOnLeft = dockLeft + dockRect.width / 2 < rect.width / 2;
+            if (dockOnLeft) {
+                const start = Math.min(Math.max(dockRight + 8, 12), rect.width - 240);
+                panelWidth = Math.min(width, rect.width - 12 - start);
+                left = start;
+            } else {
+                panelWidth = Math.min(width, Math.max(240, dockLeft - 20));
+                left = dockLeft - 8 - panelWidth;
+            }
+        }
         const top = posAnchor.top - estimatedHeight - 8;
         const maxTop = Math.max(statusSafeTop, rect.height - estimatedHeight - 12);
         setPopoverPosition({
-            left: Math.min(Math.max(12, left), Math.max(12, rect.width - width - 12)),
+            left: Math.min(Math.max(12, left), Math.max(12, rect.width - panelWidth - 12)),
             top: Math.min(Math.max(statusSafeTop, top), maxTop),
+            width: dockEl ? panelWidth : undefined,
         });
-    }, [open, floatingPosition, dockState.anchorPosition, draggingFloatingButton]);
+    }, [
+        open,
+        floatingPosition,
+        dockState.anchorPosition,
+        draggingFloatingButton,
+        managedQuick,
+        controlDockState.anchorByControl,
+        controlDockState.dockSide,
+        controlDockState.dockY,
+    ]);
 
     const currentSlot: BindingSlot = useMemo(() => {
         if (scope === "global") return config.globalDefaults || {};
@@ -413,7 +445,7 @@ export function QuickActionFloat() {
     }
 
     function handleFloatingPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
-        const isDual = floatingDockEnabled && promptViewerEnabled && enabled;
+        const isDual = floatingDockEnabled && promptViewerEnabled && active;
         const isQuickPrimary = !isDual || dockState.primaryTool === "quick-action";
         if (dockState.isExpanded || (isDual && !isQuickPrimary)) {
             // 展开挑选模式、或并非当前停靠的主球时，不接受拖拽
@@ -503,7 +535,7 @@ export function QuickActionFloat() {
         }
 
         if (floatingDockEnabled) {
-            const isDual = promptViewerEnabled && enabled;
+            const isDual = promptViewerEnabled && active;
             const isQuickPrimary = !isDual || dockState.primaryTool === "quick-action";
             // Dual-ball mode: if currently docked as primary and not expanded, clicking expands both balls!
             if (isDual && isQuickPrimary && dockState.isDocked && !dockState.isExpanded) {
@@ -517,7 +549,7 @@ export function QuickActionFloat() {
         setOpen(true);
     }
 
-    if (!enabled) return null;
+    if (!active) return null;
 
     const characterDisabled = scope === "character" && characters.length === 0;
     const inheritApiLabel = scope === "global"
@@ -531,10 +563,10 @@ export function QuickActionFloat() {
             ? `继承全局：${inheritedWorldBookNames.join("、")}`
             : "继承全局";
     const popoverStyle: CSSProperties | undefined = popoverPosition
-        ? { left: popoverPosition.left, top: popoverPosition.top }
+        ? { left: popoverPosition.left, top: popoverPosition.top, width: popoverPosition.width }
         : undefined;
 
-    const isDual = floatingDockEnabled && promptViewerEnabled && enabled;
+    const isDual = floatingDockEnabled && promptViewerEnabled && active;
     const isQuickPrimary = !isDual || dockState.primaryTool === "quick-action";
     const isPromptViewerActive = floatingDockEnabled && promptViewerEnabled && dockState.activeTool === "prompt-viewer";
 

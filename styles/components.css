@@ -1756,12 +1756,17 @@
   flex-direction: column;
   overflow: hidden;
   color: var(--c-text-title);
-  background: color-mix(in srgb, var(--c-card) 88%, rgba(255,255,255,0.76));
+  /* 底板必须接近不透明：dev 下 Lightning CSS 会把 backdrop-filter 丢掉，
+     只靠 --c-card(rgba(255,255,255,.7)) 会被桌面内容直接透上来看不清。
+     先用不透明的 --c-panel 兜底，再用 color-mix 混一点卡片色保留主题倾向。 */
+  background: var(--c-panel, #ffffff);
+  background: color-mix(in srgb, var(--c-card, rgba(255, 255, 255, 0.7)) 14%, var(--c-panel, #ffffff) 86%);
   backdrop-filter: blur(26px) saturate(1.18);
   -webkit-backdrop-filter: blur(26px) saturate(1.18);
+  border: 1px solid color-mix(in srgb, var(--c-card-border, #E0E0E0) 80%, transparent);
   border-radius: 24px;
   box-shadow:
-    0 16px 48px rgba(31, 54, 87, 0.14),
+    0 16px 48px rgba(31, 54, 87, 0.22),
     inset 0 1px 0 rgba(255,255,255,0.38);
   animation: quick-action-pop 180ms ease-out both;
 }

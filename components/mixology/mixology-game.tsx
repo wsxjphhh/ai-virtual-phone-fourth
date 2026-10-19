@@ -1454,13 +1454,14 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
     const [wcPop, setWcPop] = useState(false);
     const wcRef = useRef<HTMLDivElement>(null);
 
-    // 字数统计浮标归坞管理：勾选 = 正常显示（坞按钮可再临时收起），取消勾选 = 彻底隐藏
-    // 这里必须走订阅态而不是 isControlPinned，否则勾选变化时浮标显隐不会实时刷新
+    // 字数浮标 / 剧情侧轨 / 溯源罗盘吃"可使用"这一维：停用 = 界面上彻底不出现；
+    // 只关"常驻显示" = 浮标照常，坞条不再占位，入口收进坞底「更多」。
+    // 这里必须走订阅态而不是 isControlEnabled()，否则开关变化时浮标显隐不会实时刷新
     const controlDockState = useSyncExternalStore(subscribeControlDockState, getControlDockState, getControlDockState);
-    const managedWc = controlDockState.pinned["mix-word-count"] !== false;
-    // 侧轨与罗盘同样吃坞里的勾选：取消勾选 = 彻底不出现，不会退回自由悬浮
-    const showRail = controlDockState.pinned["mix-story-rail"] !== false && !railHidden;
-    const compassAllowed = controlDockState.pinned["mix-story-compass"] !== false;
+    const wcEnabled = controlDockState.enabled["mix-word-count"] !== false;
+    // 侧轨与罗盘同样只关可用时才消失，不会退回自由悬浮
+    const showRail = controlDockState.enabled["mix-story-rail"] !== false && !railHidden;
+    const compassAllowed = controlDockState.enabled["mix-story-compass"] !== false;
     const [wcUserHidden, setWcUserHidden] = useState(false);
     useEffect(() => {
         const handler = (e: Event) => {
@@ -1548,7 +1549,7 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
     return (
         <>
             <MixModelBadge />
-            {managedWc && !wcUserHidden && (
+            {wcEnabled && !wcUserHidden && (
             <div
                 className="mix-word-count-badge"
                 id="mix-word-count-badge"
