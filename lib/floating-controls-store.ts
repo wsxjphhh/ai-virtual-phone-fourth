@@ -11,9 +11,7 @@
 
 export type ControlId =
     | "quick-action"
-    | "prompt-viewer"
     | "mini-chat"
-    | "mascot"
     | "quick-note"
     | "mix-tree"
     | "mix-word-count"
@@ -34,8 +32,6 @@ export type ControlDef = {
 export const CONTROL_DEFS: ControlDef[] = [
     { id: "quick-action", label: "快捷切换", scope: "global" },
     { id: "mini-chat", label: "聊天小窗", scope: "global" },
-    { id: "prompt-viewer", label: "提示词", scope: "global" },
-    { id: "mascot", label: "桌宠", scope: "global" },
     { id: "quick-note", label: "速记", scope: "global" },
     { id: "mix-tree", label: "世界树", scope: "mixology" },
     { id: "mix-word-count", label: "字数统计", scope: "mixology" },

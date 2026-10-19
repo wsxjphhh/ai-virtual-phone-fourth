@@ -20,7 +20,7 @@ import {
 import { loadMixSessions, getMixMaterial } from "@/lib/mixology/storage";
 import { mixRoundCount } from "@/lib/mixology/engine";
 import { mixSlotFirstId, type MixCharacterCard, type MixSession } from "@/lib/mixology/types";
-import { CONTROL_DOCK_ACTIVATE_EVENT } from "@/lib/floating-controls-store";
+import { CONTROL_DOCK_ACTIVATE_EVENT, isDockManaged } from "@/lib/floating-controls-store";
 
 type FloatingPosition = { left: number; top: number };
 type PopoverPosition = { left: number; top: number };
@@ -122,6 +122,9 @@ export function MixSessionSwitcher({ sessionId, onSwitch }: Props) {
     const layerRef = useRef<HTMLDivElement | null>(null);
     const buttonRef = useRef<HTMLButtonElement | null>(null);
 
+    // 已由统一控制坞接管：自身悬浮按钮不再显示，入口是坞按钮或「更多」列表项
+    const managed = isDockManaged("mix-session-switcher");
+
     // 订阅运行时状态，用于更新每个对局的状态圆点
     const runtimeState = useSyncExternalStore(
         subscribeMixSessionRuntime,
@@ -187,35 +190,55 @@ export function MixSessionSwitcher({ sessionId, onSwitch }: Props) {
     // 计算弹出面板位置
     useLayoutEffect(() => {
         const layer = layerRef.current;
-        const button = buttonRef.current;
-        if (!open || !layer || !button) {
+        if (!open || !layer) {
             setPopoverPosition(null);
             return;
         }
         const rect = layer.getBoundingClientRect();
-        const buttonRect = button.getBoundingClientRect();
-        const posAnchor = dragging && floatingPosition
-            ? floatingPosition
-            : floatingPosition ?? {
-                  left: buttonRect.left - rect.left,
-                  top: buttonRect.top - rect.top,
-              };
-
         const width = Math.min(280, rect.width - 32);
         const estimatedHeight = Math.min(360, Math.max(200, rect.height - 120));
-        // 面板出现在悬浮球的对侧（靠左就出右边，靠右就出左边）
-        const isLeftSide = dockSide === "left";
-        const left = isLeftSide
-            ? posAnchor.left + 48 + 8 // 球在左，面板在球右边
-            : posAnchor.left - width - 8; // 球在右，面板在球左边
-        const top = posAnchor.top - estimatedHeight / 2 + 24;
-        const maxTop = Math.max(60, rect.height - estimatedHeight - 16);
 
+        let left: number;
+        let top: number;
+
+        if (managed) {
+            // 坞接管模式：通过查询坞按钮的实际位置来确定面板左边界
+            // 坞按钮在 .fcd-dock 容器内，right: 12px，宽 46px
+            // 面板右边缘应紧贴坞按钮左边缘外侧，留 8px 间距
+            const dockRightMargin = 12;
+            const dockButtonWidth = 46;
+            const gap = 8;
+            const dockOccupiedWidth = dockRightMargin + dockButtonWidth + gap; // 66px
+            left = Math.max(16, rect.width - width - dockOccupiedWidth);
+            top = Math.min(Math.max(60, rect.height * 0.25), rect.height - estimatedHeight - 16);
+        } else {
+            // 独立悬浮球模式：以悬浮球为锚点
+            const button = buttonRef.current;
+            if (!button) {
+                setPopoverPosition(null);
+                return;
+            }
+            const buttonRect = button.getBoundingClientRect();
+            const posAnchor = dragging && floatingPosition
+                ? floatingPosition
+                : floatingPosition ?? {
+                      left: buttonRect.left - rect.left,
+                      top: buttonRect.top - rect.top,
+                  };
+            // 面板出现在悬浮球的对侧（靠左就出右边，靠右就出左边）
+            const isLeftSide = dockSide === "left";
+            left = isLeftSide
+                ? posAnchor.left + 48 + 8 // 球在左，面板在球右边
+                : posAnchor.left - width - 8; // 球在右，面板在球左边
+            top = posAnchor.top - estimatedHeight / 2 + 24;
+        }
+
+        const maxTop = Math.max(60, rect.height - estimatedHeight - 16);
         setPopoverPosition({
             left: Math.min(Math.max(16, left), Math.max(16, rect.width - width - 16)),
             top: Math.min(Math.max(60, top), maxTop),
         });
-    }, [open, floatingPosition, dragging, dockSide]);
+    }, [open, floatingPosition, dragging, dockSide, managed]);
 
     function getButtonBounds(button: HTMLButtonElement, currentPos: FloatingPosition | null) {
         const parent = button.offsetParent instanceof HTMLElement ? button.offsetParent : null;
@@ -357,24 +380,26 @@ export function MixSessionSwitcher({ sessionId, onSwitch }: Props) {
 
     return (
         <div className="mix-session-switcher-layer" ref={layerRef}>
-            <button
-                ref={buttonRef}
-                type="button"
-                className="mix-session-switcher-btn"
-                aria-label="切换对局"
-                data-dragging={dragging ? "" : undefined}
-                data-dock-side={dockSide}
-                data-generating={anyGenerating ? "" : undefined}
-                onPointerDown={handlePointerDown}
-                onPointerMove={handlePointerMove}
-                onPointerUp={handlePointerEnd}
-                onPointerCancel={handlePointerEnd}
-                onClick={handleButtonClick}
-                style={buttonStyle}
-            >
-                <GlassWater size={22} strokeWidth={1.8} />
-                {anyGenerating ? <span className="mix-switcher-dot-pulse" /> : null}
-            </button>
+            {!managed ? (
+                <button
+                    ref={buttonRef}
+                    type="button"
+                    className="mix-session-switcher-btn"
+                    aria-label="切换对局"
+                    data-dragging={dragging ? "" : undefined}
+                    data-dock-side={dockSide}
+                    data-generating={anyGenerating ? "" : undefined}
+                    onPointerDown={handlePointerDown}
+                    onPointerMove={handlePointerMove}
+                    onPointerUp={handlePointerEnd}
+                    onPointerCancel={handlePointerEnd}
+                    onClick={handleButtonClick}
+                    style={buttonStyle}
+                >
+                    <GlassWater size={22} strokeWidth={1.8} />
+                    {anyGenerating ? <span className="mix-switcher-dot-pulse" /> : null}
+                </button>
+            ) : null}
 
             {open ? (
                 <div

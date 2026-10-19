@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { SlidersHorizontal, MessageSquare, FileText, Network, Type, Layers, Settings2, LayoutGrid, ChevronRight, Cat, MoveVertical, Compass, Cpu, ArrowLeftRight, StickyNote, MoreHorizontal } from "lucide-react";
+import { SlidersHorizontal, MessageSquare, Network, Type, Layers, LayoutGrid, ChevronRight, MoveVertical, Compass, Cpu, ArrowLeftRight, StickyNote, MoreHorizontal, Settings2 } from "lucide-react";
 import {
     CONTROL_DEFS,
     CONTROL_LABELS,
@@ -25,8 +25,6 @@ import {
 const ICONS: Record<ControlId, React.ReactNode> = {
     "quick-action": <SlidersHorizontal size={22} strokeWidth={1.9} />,
     "mini-chat": <MessageSquare size={21} strokeWidth={1.9} />,
-    "prompt-viewer": <FileText size={21} strokeWidth={1.9} />,
-    "mascot": <Cat size={21} strokeWidth={1.9} />,
     "quick-note": <StickyNote size={21} strokeWidth={1.9} />,
     "mix-tree": <Network size={21} strokeWidth={1.8} />,
     "mix-word-count": <Type size={21} strokeWidth={1.9} />,
