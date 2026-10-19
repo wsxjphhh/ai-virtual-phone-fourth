@@ -363,8 +363,16 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
      * 懒加载：收起的更早轮次数（从头数）。记"收起几条"而不是"露出几条"：
      * 回溯把后面的轮次砍掉时，收起的那些不会因此从顶上冒出来把画面往下推——
      * 用户正停在被回溯的那一轮上，iOS 没有 scroll anchoring，顶上一长就跳走了。
+     *
+     * 初值必须在这里算好，不能留 0 等 layouteffect 去收：`session.turns.slice(hiddenTurnCount)`
+     * 是渲染入口，留 0 就是**首帧把整局全渲出来**（实测 415 轮那场首帧渲 415 行、每行还要挂
+     * 沙盒 iframe），下一次 commit 才收到只剩 12 行——那 403 行白渲白拆，正是"进对局卡好几秒"
+     * 里随轮数增长的那一块。开发机同一份真实数据：进那场 415 轮对局的长任务 3863ms（原始）
+     * → 2227ms（先消掉重复 JSON.parse）→ **344ms**（本初值），渲染行数 415 → 12。
+     * 下面 `useLayoutEffect([sessionId])` 里那次 setHiddenTurnCount 与本初值同式，
+     * 数值相同 React 直接跳过重渲染，只保留它负责的另一半（定 stickRef / applyStick）。
      */
-    const [hiddenTurnCount, setHiddenTurnCount] = useState(0);
+    const [hiddenTurnCount, setHiddenTurnCount] = useState(() => Math.max(0, (session?.turns.length ?? 0) - MIX_INITIAL_TURNS));
     /**
      * 展开更早的轮次后，把原来最上面那条钉在屏幕上原来的位置：新插进来的轮次里
      * 小票/小剧场 iframe 是异步报高的，头一两秒内容会连着长高几次，每次报高都按锚点重落一次，
