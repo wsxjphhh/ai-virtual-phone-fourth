@@ -49,6 +49,12 @@ const FIRST_PAINT_FONT_SPECS = [
 /** 字体预热的最长等待时间；到点无条件放行。 */
 const FONT_WARM_TIMEOUT_MS = 1500;
 
+/**
+ * 主题首帧资源（壁纸解码 + 主题字体）预热的最长等待时间；到点无条件放行。
+ * 页面不可见时 `img.decode()` 可能永远不 resolve，不放行就是把开机页卡在「加载中」。
+ */
+const THEME_PRELOAD_TIMEOUT_MS = 1500;
+
 async function warmFirstPaintFonts(): Promise<void> {
   if (typeof window === "undefined" || typeof document === "undefined" || !document.fonts) {
     return;
@@ -155,9 +161,18 @@ async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme>
   const fontDataUrl = profile.fontAssetId ? assets[profile.fontAssetId] : null;
   // 壁纸解码与主题字体预热并行：字体先就位，桌面首帧就是最终排版，
   // 不会再出现「先兜底字体、再整页重排」的二次布局。
-  await Promise.all([
-    ...Object.values(assets).map(preloadImageDataUrl),
-    preloadFontFace(fontDataUrl)
+  //
+  // 这一整段必须限时放行：`image.decode()` 在页面不可见时**根本不会 resolve**
+  // （同款环境实测：1x1 的 dataURL 图片 onload 立刻到，decode() 挂到超时都不回来）。
+  // 而 ready 状态就挂在这个 await 后面——端上 WebView 若在后台被创建/预热，
+  // 开机页会永远停在「加载中」、进入按钮一直禁用。它只是首帧观感优化，
+  // 超时就放行，最多多一次重排，不能让它挡住开机。
+  await Promise.race([
+    Promise.all([
+      ...Object.values(assets).map(preloadImageDataUrl),
+      preloadFontFace(fontDataUrl)
+    ]),
+    new Promise<void>((resolve) => window.setTimeout(resolve, THEME_PRELOAD_TIMEOUT_MS))
   ]);
   return { profile, assets };
 }
