@@ -1756,13 +1756,13 @@
   flex-direction: column;
   overflow: hidden;
   color: var(--c-text-title);
-  /* 底板必须接近不透明：dev 下 Lightning CSS 会把 backdrop-filter 丢掉，
-     只靠 --c-card(rgba(255,255,255,.7)) 会被桌面内容直接透上来看不清。
-     先用不透明的 --c-panel 兜底，再用 color-mix 混一点卡片色保留主题倾向。 */
+  /* 底板透明度：dev 下这条规则原本手写了两份 backdrop-filter（标准 + -webkit-），
+     Lightning CSS 会把标准那条折叠掉，而本机 Chromium 只认标准写法 → dev 里完全不糊，
+     0.7 的 --c-card 直接把桌面内容透出来。这里去掉手写前缀（Lightning 会自动补，实测 dev 产物
+     重新拿到 blur(26px)），底板取折中档：blur 生效时是毛玻璃，万一失效也还读得清。 */
   background: var(--c-panel, #ffffff);
-  background: color-mix(in srgb, var(--c-card, rgba(255, 255, 255, 0.7)) 14%, var(--c-panel, #ffffff) 86%);
+  background: color-mix(in srgb, var(--c-card, rgba(255, 255, 255, 0.7)) 42%, var(--c-panel, #ffffff) 58%);
   backdrop-filter: blur(26px) saturate(1.18);
-  -webkit-backdrop-filter: blur(26px) saturate(1.18);
   border: 1px solid color-mix(in srgb, var(--c-card-border, #E0E0E0) 80%, transparent);
   border-radius: 24px;
   box-shadow:
