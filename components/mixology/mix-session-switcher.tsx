@@ -20,6 +20,7 @@ import {
 import { loadMixSessions, getMixMaterial } from "@/lib/mixology/storage";
 import { mixRoundCount } from "@/lib/mixology/engine";
 import { mixSlotFirstId, type MixCharacterCard, type MixSession } from "@/lib/mixology/types";
+import { CONTROL_DOCK_ACTIVATE_EVENT } from "@/lib/floating-controls-store";
 
 type FloatingPosition = { left: number; top: number };
 type PopoverPosition = { left: number; top: number };
@@ -135,6 +136,17 @@ export function MixSessionSwitcher({ sessionId, onSwitch }: Props) {
 
     const refreshSessions = useCallback(() => {
         setSessions(loadMixSessions());
+    }, []);
+
+    // 受统一控制坞驱动：坞里点「对局切换」时切换本面板开合
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ control?: string }>).detail;
+            if (detail?.control !== "mix-session-switcher") return;
+            setOpen(prev => !prev);
+        };
+        window.addEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
+        return () => window.removeEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
     }, []);
 
     // 点击外部关闭
