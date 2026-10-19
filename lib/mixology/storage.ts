@@ -4,6 +4,7 @@
 // 在酒材页作为官方条目展示，吧台槽位选择时与酒柜材料并排可选。
 
 import { kvGet, kvSet, registerKvMigration } from "../kv-db";
+import { dropMixPendingForSession } from "./pending-queue";
 import type {
     MixConnector,
     MixFavoritePreset,
@@ -394,6 +395,8 @@ export function deleteMixSession(id: string): void {
         if (f.sessionIds.length !== before) { f.updatedAt = Date.now(); changed = true; }
     }
     if (changed) writeJson(SESSION_FOLDERS_KEY, folders);
+    // 缓冲发送区里这场的待发消息一并作废，不给孤儿数据留存档
+    dropMixPendingForSession(id);
 }
 
 /**

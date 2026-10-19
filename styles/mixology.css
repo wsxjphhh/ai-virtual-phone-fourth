@@ -1838,6 +1838,109 @@
     }
 }
 
+/* ── 缓冲发送区：调制中写好的后续剧情，挂在输入栏上方排队 ── */
+.mix-pending-bar {
+    flex: 0 0 auto;
+    margin: 0 12px 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--mix-line);
+    border-radius: 14px;
+    background: rgba(11, 11, 16, 0.72);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.mix-pending-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.mix-pending-title {
+    flex: 0 0 auto;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--mix-gold);
+}
+
+.mix-pending-hint {
+    flex: 1;
+    min-width: 0;
+    font-size: 10.5px;
+    color: var(--mix-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mix-pending-ops {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+}
+
+.mix-pending-btn {
+    border: 1px solid var(--mix-line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--mix-text);
+    font-size: 10.5px;
+    padding: 3px 8px;
+    cursor: pointer;
+}
+
+.mix-pending-btn:active {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.mix-pending-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 156px;
+    overflow-y: auto;
+}
+
+.mix-pending-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.mix-pending-idx {
+    flex: 0 0 auto;
+    font-size: 10.5px;
+    color: var(--mix-faint);
+    line-height: 1.6;
+}
+
+.mix-pending-text {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--mix-text);
+    white-space: pre-wrap;
+    word-break: break-all;
+    /* 折叠成两行预览，长剧情不把托盘撑爆；完整内容点「取回编辑」看 */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.mix-pending-act {
+    flex: 0 0 auto;
+    padding: 2px;
+    opacity: 0.6;
+}
+
 .mix-game-input {
     flex: 1;
     min-width: 0;

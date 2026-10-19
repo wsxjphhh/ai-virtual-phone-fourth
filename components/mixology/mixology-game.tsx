@@ -57,10 +57,27 @@ import {
     getMixSessionRuntimeState,
     enqueueMixGeneration,
     cancelMixGeneration,
+    getMixSessionGenStatus,
 } from "@/lib/mixology/session-runtime";
+import {
+    subscribeMixPending,
+    getMixPendingState,
+    getMixPendingQueue,
+    isMixPendingPaused,
+    setMixPendingPaused,
+    pushMixPending,
+    takeMixPending,
+    removeMixPending,
+    clearMixPending,
+    MIX_PENDING_MAX,
+    type MixPendingItem,
+} from "@/lib/mixology/pending-queue";
 
 /** 当前真正挂着的对局：严格模式的重复挂载靠它区分「真退出」与「假卸载」 */
 const liveMixGames = new Set<string>();
+
+/** 缓冲发送区空队列兜底：useSyncExternalStore 要求未变化时同引用，不能每次现造 [] */
+const EMPTY_MIX_PENDING: MixPendingItem[] = [];
 
 type GameProps = {
     sessionId: string;
@@ -278,6 +295,15 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
     const live = runningEntry?.liveText ?? "";
     const genStatus = runningEntry?.status ?? null;
     /**
+     * 缓冲发送区：调制期间敲好的后续剧情按局排队（模块级 store，切界面/刷新都不丢），
+     * 出杯后由下面的状态迁移效果逐条自动接话。
+     */
+    const pendingState = useSyncExternalStore(subscribeMixPending, getMixPendingState, getMixPendingState);
+    const pendingQueue = pendingState.queues[sessionId] ?? EMPTY_MIX_PENDING;
+    const pendingPaused = !!pendingState.paused[sessionId];
+    /** 接话函数够不着声明位置（它在早退 return 之后才定义），状态迁移效果经由这个 ref 调它 */
+    const pumpPendingRef = useRef<() => void>(() => {});
+    /**
      * 当前正在显示的对局 id（ref 版）：生成是异步的，期间用户可能切去别的对局，
      * 旧闭包里的 commit 靠它判断自己是否已经过期，避免把旧对局数据刷进新界面。
      */
@@ -299,7 +325,21 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
         const wasActive = prev === "generating" || prev === "queued";
         const isActive = genStatus === "generating" || genStatus === "queued";
         if (wasActive && !isActive) setSession(getMixSession(sessionId));
+        // 缓冲发送区自动接话的状态迁移口径：
+        // · 正常出杯（→done）后 runtime 清掉条目（done→null）→ 取队首接话；
+        // · 没走到 done 就结束（生成出错、被取消）→ 自动接话暂停。失败之后再把
+        //   后文往坏掉的现场里灌没有意义，队列原样留着等玩家点「继续发送」。
+        if (wasActive && !isActive && genStatus !== "done") setMixPendingPaused(sessionId, true);
+        if (prev === "done" && genStatus === null) pumpPendingRef.current();
     }, [genStatus, sessionId]);
+    // 带着队列回到一场此刻没有任何生成的对局：补接一棒。
+    // 生成发生在界面外的话，done→null 那次迁移组件没挂着、捕捉不到，这里兜底；
+    // pumpPending 自己会看 runtime 状态，残留态/暂停/空队列都会原样退回。
+    useEffect(() => {
+        if (!getMixPendingQueue(sessionId).length) return;
+        const t = setTimeout(() => pumpPendingRef.current(), 300);
+        return () => clearTimeout(t);
+    }, [sessionId]);
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     /** 开新支线弹层状态：记录从哪条消息分叉（turnId + 绝对索引） */
     const [fork, setFork] = useState<{ turnId: string; idx: number } | null>(null);
@@ -1144,10 +1184,30 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
         commit();
     };
 
+    /**
+     * 缓冲发送区接一棒：队首那条此刻开口。
+     * runtime 里还有任何状态的条目（generating/queued/done/error 残留）都不接 ——
+     * done 残留期 enqueue 会被静默忽略，消息弹出来却没发就走，宁可交给下一次迁移。
+     */
+    const pumpPending = () => {
+        if (getMixSessionGenStatus(sessionId)) return;
+        if (isMixPendingPaused(sessionId)) return;
+        const next = takeMixPending(sessionId);
+        if (!next) return;
+        stickRef.current = "bottom";
+        run((signal, commit, onDelta) => generateMixReply(sessionId, next.text, signal, commit, onDelta));
+    };
+    pumpPendingRef.current = pumpPending;
+
     const handleSend = () => {
         const text = input.trim();
         if (!text) return;
         setInput("");
+        // 调制中不拦笔：这句先进缓冲发送区，出杯后按序自动接话
+        if (busy) {
+            if (!pushMixPending(sessionId, text)) onToast(`缓冲发送区最多排 ${MIX_PENDING_MAX} 条，先处理一批再写。`);
+            return;
+        }
         // 一开口就把落点钉到底：用户那一轮要等落杯前钩子跑完才落库，
         // 这中间界面还是「没人开过口」的样子，不钉住就会被拽回扉页顶上
         stickRef.current = "bottom";
@@ -1155,7 +1215,11 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
     };
 
     sayRef.current = (text: string) => {
-        if (busy) return;
+        // 机括开口和输入框同一套规矩：调制中转进缓冲，出杯后轮到它
+        if (busy) {
+            if (!pushMixPending(sessionId, text)) onToast(`缓冲发送区最多排 ${MIX_PENDING_MAX} 条，先处理一批再写。`);
+            return;
+        }
         stickRef.current = "bottom";
         run((signal, commit, onDelta) => generateMixReply(sessionId, text, signal, commit, onDelta));
     };
@@ -1950,6 +2014,58 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
                     ))}
                 </div>
             ) : null}
+            {/* 缓冲发送区：调制中写好的后续剧情在这里排队，出杯一条接一条 */}
+            {pendingQueue.length ? (
+                <div className="mix-pending-bar">
+                    <div className="mix-pending-head">
+                        <span className="mix-pending-title">缓冲发送区 · {pendingQueue.length} 条</span>
+                        <span className="mix-pending-hint">
+                            {pendingPaused
+                                ? "上一拍生成未正常完成，自动接话已暂停"
+                                : busy
+                                    ? "出杯后逐条自动发送"
+                                    : "待发"}
+                        </span>
+                        <span className="mix-pending-ops">
+                            {!busy ? (
+                                <button type="button" className="mix-pending-btn" onClick={() => { setMixPendingPaused(sessionId, false); pumpPending(); }}>
+                                    {pendingPaused ? "继续发送" : "立即发送"}
+                                </button>
+                            ) : null}
+                            <button type="button" className="mix-pending-btn" onClick={() => clearMixPending(sessionId)}>清空</button>
+                        </span>
+                    </div>
+                    <div className="mix-pending-list">
+                        {pendingQueue.map((item, i) => (
+                            <div className="mix-pending-item" key={item.id}>
+                                <span className="mix-pending-idx">{i + 1}</span>
+                                <span className="mix-pending-text">{item.text}</span>
+                                <button
+                                    type="button"
+                                    className="mix-icon-btn mix-pending-act"
+                                    aria-label="取回编辑"
+                                    title="取回编辑"
+                                    onClick={() => {
+                                        removeMixPending(sessionId, item.id);
+                                        setInput((prev) => (prev ? `${prev}\n${item.text}` : item.text));
+                                    }}
+                                >
+                                    <Pencil size={13} />
+                                </button>
+                                <button
+                                    type="button"
+                                    className="mix-icon-btn mix-pending-act"
+                                    aria-label="删除这条"
+                                    title="删除这条"
+                                    onClick={() => removeMixPending(sessionId, item.id)}
+                                >
+                                    <X size={13} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
             <div className="mix-game-inputbar">
                 {slotGroups["inputbar-left"].map(({ material, layout }) => (
                     <button
@@ -1985,8 +2101,9 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
                             handleSend();
                         }
                     }}
-                    placeholder={busy ? "调制中…" : "说点什么…"}
-                    disabled={busy}
+                    placeholder={busy
+                        ? (pendingQueue.length ? `调制中…已排 ${pendingQueue.length} 条，继续写接着排` : "调制中…现在写的会进缓冲发送区")
+                        : "说点什么…"}
                 />
                 <button
                     type="button"
@@ -2011,7 +2128,7 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
                         {layout.icon || "◈"}
                     </button>
                 ))}
-                <button type="button" className="mix-send-btn" onClick={handleSend} disabled={busy || !input.trim()} aria-label="发送">
+                <button type="button" className="mix-send-btn" onClick={handleSend} disabled={!input.trim()} aria-label={busy ? "加入缓冲发送区" : "发送"}>
                     <Send size={16} />
                 </button>
             </div>
