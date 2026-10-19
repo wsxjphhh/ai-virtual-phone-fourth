@@ -26,7 +26,7 @@
 import { isKvHydrated, kvEntries, kvGet, kvSet } from "./kv-db";
 
 /** 每次改动探针口径时手动 +1，方便把日志和代码版本对上 */
-export const PERF_PROBE_BUILD = "2026-10-19.b（桌面常驻挂载 a8b82fc）";
+export const PERF_PROBE_BUILD = "2026-10-19.c（对局存储备忘 c80069d + 首帧窗口 e37cffc）";
 
 const LOG_KEY = "perf_probe_log_v1";
 const MAX_EVENTS = 400;

@@ -3869,16 +3869,47 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     const shell = shellRef.current;
     if (!shell) return;
     const CLOSE_SEL = ".page-back-btn, [aria-label='返回'], [aria-label='关闭'], .custom-app-runner-capsule .cap-btn";
+    /** 这一次按下有没有真的走成一次 click（手指滑开就没有）——决定遮罩该不该收回 */
+    let closeClicked = false;
     const onDown = (event: PointerEvent) => {
       const target = event.target as Element | null;
       if (!target?.closest?.(".phone-app-pane") || !target.closest?.(CLOSE_SEL)) return;
       exitPendingRef.current = { at: performance.now(), app: activeAppRef.current };
+      closeClicked = false;
       exitVeilRef.current?.classList.add("is-on");
       perfProbeMark("app-change", { app: activeAppRef.current, d: { phase: "close-tap" } });
     };
+    /**
+     * 收回遮罩的判定必须等主线程空下来，不能按墙上时间算。
+     * 真机日志（2026-10-19 第二份）11 次退出里 veil-painted 全落在 393~519ms，
+     * 而退出那次 React 提交要 628~697ms：原来用 pointerup+500ms 的定时器判定
+     * "没走成返回"，每次都抢在提交之前把遮罩收回、顺手清掉 pending ——
+     * 于是「手指滑开」和「手机慢」这两种情况分不开：手机上转圈闪一下就没了、
+     * 屏幕还在卡（正是用户说的"不知道是卡住了还是什么"），探针也一条
+     * exit-overlay 都记不到（那份日志里 exit-overlay 确实是 0 条）。
+     * 改成双 rAF：主线程被提交占住时帧根本不会走，等这两帧跑到时 activeApp 已经是
+     * null 了 → 不收回，交给下面的 measured 路径；只有 App 还开着（应用内返回、
+     * 或手指滑开）才收回，而且此时离按下才十几毫秒，遮罩还没到 220ms 的显形延迟，
+     * 应用内返回不会再闪一下。
+     */
+    const decideAfterCommit = () => {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (exitPendingRef.current && activeAppRef.current) finishExitVeil(false);
+      }));
+    };
+    const onClick = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest?.(".phone-app-pane") || !target.closest?.(CLOSE_SEL)) return;
+      closeClicked = true;
+      decideAfterCommit();
+      // 墙上时钟兜底：页面在后台时 rAF 根本不触发（实测踩过），双 rAF 的判定永远不会跑，
+      // 应用内返回的遮罩会一直留到 10s 保险。1200ms 远大于真机实测最慢的那次退出提交
+      // （628~697ms），前台慢机器上这会儿 activeApp 已经是 null 了，不会误收。
+      window.setTimeout(() => { if (activeAppRef.current) finishExitVeil(false); }, 1200);
+    };
     const onUp = () => {
-      // 按下后没真的触发返回（手指滑开了）→ 别把遮罩留在那儿
-      window.setTimeout(() => { if (activeAppRef.current) finishExitVeil(false); }, 500);
+      // 没走成 click（按下后手指滑开）→ 短延时收掉，别让遮罩留在屏幕上
+      window.setTimeout(() => { if (!closeClicked && activeAppRef.current) finishExitVeil(false); }, 400);
     };
     // 遮罩真的显形了没有？这一步由合成器完成，主线程卡住时理论上仍会淡入，
     // 但那正是需要在真机上证实的假设 —— 用 transitionend 留下硬证据。
@@ -3896,11 +3927,13 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     shell.addEventListener("pointerdown", onDown, true);
     shell.addEventListener("pointerup", onUp, true);
     shell.addEventListener("pointercancel", onUp, true);
+    shell.addEventListener("click", onClick, true);
     veil?.addEventListener("transitionend", onVeilShown);
     return () => {
       shell.removeEventListener("pointerdown", onDown, true);
       shell.removeEventListener("pointerup", onUp, true);
       shell.removeEventListener("pointercancel", onUp, true);
+      shell.removeEventListener("click", onClick, true);
       veil?.removeEventListener("transitionend", onVeilShown);
     };
   }, [finishExitVeil]);
