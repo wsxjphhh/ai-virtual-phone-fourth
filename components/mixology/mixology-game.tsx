@@ -81,6 +81,17 @@ const MIX_INITIAL_TURNS = 12;
 const MIX_LOAD_MORE_TURNS = 12;
 /** 回溯把轮次砍短后至少还露着几条（不足就把收起数往回让） */
 const MIX_MIN_VISIBLE_TURNS = 4;
+/**
+ * 跳转（罗盘 / 侧轨点某一轮）时一次只铺开这么多条。
+ *
+ * 以前跳旧剧情是把「目标那一轮一直到最新一条」整段铺出来：那一局 126 条 50 万字，
+ * 从第 1 轮跳一下就是 126 行 DOM + 68 个沙盒 iframe，开发机实测首帧长任务 1973ms，
+ * 真机 2.9~4.3 秒（见 docs/改动记录.md 第四份日志）。收成一个窗口后，
+ * 往上翻页走「查看更早」，往下续读走「查看更新的」，两边各 12 条一批。
+ */
+const MIX_JUMP_WINDOW_TURNS = 12;
+/** 跳转窗口给目标前面留几条，免得落点紧贴视口上沿看不出上下文 */
+const MIX_JUMP_LEAD_TURNS = 2;
 
 function AssistantTurn({ turn, ticketFrames, encoreFrames, filterRules, state, dialogue }: { turn: MixTurn; ticketFrames: TurnFrame[]; encoreFrames: TurnFrame[]; filterRules?: MixFilterRule[]; state?: MixState; dialogue?: MixProseDialogue }) {
     // 展示顺序：状态栏在正文前、小剧场在正文后（与模型的输出顺序一致，无需重排）；
@@ -364,8 +375,9 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
      * 回溯把后面的轮次砍掉时，收起的那些不会因此从顶上冒出来把画面往下推——
      * 用户正停在被回溯的那一轮上，iOS 没有 scroll anchoring，顶上一长就跳走了。
      *
-     * 初值必须在这里算好，不能留 0 等 layouteffect 去收：`session.turns.slice(hiddenTurnCount)`
-     * 是渲染入口，留 0 就是**首帧把整局全渲出来**（实测 415 轮那场首帧渲 415 行、每行还要挂
+     * 初值必须在这里算好，不能留 0 等 layouteffect 去收：
+     * `session.turns.slice(hiddenTurnCount, turns.length - tailHiddenCount)` 是渲染入口，
+     * 头留 0 就是**首帧把整局全渲出来**（实测 415 轮那场首帧渲 415 行、每行还要挂
      * 沙盒 iframe），下一次 commit 才收到只剩 12 行——那 403 行白渲白拆，正是"进对局卡好几秒"
      * 里随轮数增长的那一块。开发机同一份真实数据：进那场 415 轮对局的长任务 3863ms（原始）
      * → 2227ms（先消掉重复 JSON.parse）→ **344ms**（本初值），渲染行数 415 → 12。
@@ -373,6 +385,14 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
      * 数值相同 React 直接跳过重渲染，只保留它负责的另一半（定 stickRef / applyStick）。
      */
     const [hiddenTurnCount, setHiddenTurnCount] = useState(() => Math.max(0, (session?.turns.length ?? 0) - MIX_INITIAL_TURNS));
+    /**
+     * 收起的**更新**轮次数（从尾数）。平时一直是 0（人就停在最新那一截）；
+     * 只有跳旧剧情时才非零——跳过去以后，这一截窗口的下面还压着没渲染的内容，
+     * 底部给一颗「查看更新的」按钮按批放出来。渲染入口是
+     * `session.turns.slice(hiddenTurnCount, turns.length - tailHiddenCount)`，
+     * 两头都有闸门，跳转才不会把「目标到最新」整段铺出来（见 MIX_JUMP_WINDOW_TURNS 的实测数）。
+     */
+    const [tailHiddenCount, setTailHiddenCount] = useState(0);
     /**
      * 展开更早的轮次后，把原来最上面那条钉在屏幕上原来的位置：新插进来的轮次里
      * 小票/小剧场 iframe 是异步报高的，头一两秒内容会连着长高几次，每次报高都按锚点重落一次，
@@ -688,6 +708,8 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
         loadMoreAnchorRef.current = null;
         const entered = getMixSession(sessionId);
         setHiddenTurnCount(Math.max(0, (entered?.turns.length ?? 0) - MIX_INITIAL_TURNS));
+        // 换一局就是换了个窗口，上一局跳旧剧情留下的"尾部收起"不能带过来
+        setTailHiddenCount(0);
         stickRef.current = (entered?.turns ?? []).some((turn) => turn.role === "user") ? "bottom" : "top";
         // 进局算一次定位，不算"内容长高了"——不受跟随档位影响，否则刚进来就不知道自己在哪儿
         applyStick(true);
@@ -758,6 +780,8 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
      * 轮数变了跟着修正收起数：
      * · 变少（回溯/撤回）：只保证还露着几条，不多露——不然顶上冒出旧轮次把画面推下去；
      * · 变多（新一轮到了）且正贴着底：把顶上多出来的收掉，常驻的 iframe 数量不随长局增长。
+     * 尾部收起（跳旧剧情留下的那一截）同样跟着修正：贴底时一律放开，
+     * 回溯把后面的轮次砍掉时收起到还剩几条，避免出现"整段都被收起、屏幕空白"。
      */
     const turnCount = session?.turns.length ?? 0;
     useLayoutEffect(() => {
@@ -767,7 +791,12 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
             if (stickRef.current === "bottom") return Math.max(hidden, turnCount - MIX_INITIAL_TURNS);
             return hidden;
         });
-    }, [turnCount]);
+        setTailHiddenCount((tail) => {
+            if (stickRef.current === "bottom") return 0;
+            const maxTail = Math.max(0, turnCount - MIX_MIN_VISIBLE_TURNS - hiddenTurnCount);
+            return tail > maxTail ? maxTail : tail;
+        });
+    }, [turnCount, hiddenTurnCount]);
 
     /**
      * 用户自己翻页了就撒手，别在画布撑高时把他拽回去。
@@ -975,21 +1004,36 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
         flashTurn(turnId);
     }, [flashTurn]);
 
-    /** 点罗盘里的某一轮：面板先收，再把视口像电梯一样滑到那一轮 */
+    /**
+     * 点罗盘/侧轨上的某一轮：面板先收，再把视口像电梯一样滑到那一轮。
+     *
+     * 目标不在已经渲染出来的这一截里时，**不再从目标一路铺到最新**，而是把窗口整体搬到目标那儿
+     * （目标前留 MIX_JUMP_LEAD_TURNS 条、总共 MIX_JUMP_WINDOW_TURNS 条），
+     * 下面没渲染的那一截记进 tailHiddenCount，由底部的「查看更新的」按批放开。
+     * 以前这里只收头不收尾（setHiddenTurnCount(startIndex - 2) 之后尾巴全放开），
+     * 126 条那一局从第 1 轮跳一下就是 126 行 + 68 个沙盒 iframe。
+     */
     const jumpToRound = useCallback((round: CompassRound) => {
         const targetId = compassAnchorId(round);
         if (!targetId) return;
         setCompassOpen(false);
-        if (round.startIndex < hiddenTurnCount) {
-            // 目标被懒加载收着：先松开那一截。撤离跟底，否则 layouteffect 会立刻把它收回去
-            stickRef.current = "free";
-            pendingJumpRef.current = targetId;
-            setHiddenTurnCount(Math.max(0, round.startIndex - 2));
+        if (round.startIndex >= hiddenTurnCount && round.startIndex < turnCount - tailHiddenCount) {
+            // 就在渲染出来的这一截里：这是玩家亲手点的移动，不受跟随档位限制
+            window.requestAnimationFrame(() => scrollToTurn(targetId));
             return;
         }
-        // 这是玩家亲手点的移动，不受跟随档位限制
-        window.requestAnimationFrame(() => scrollToTurn(targetId));
-    }, [hiddenTurnCount, scrollToTurn]);
+        // 撤离跟底，否则 layouteffect 会立刻把窗口收回去
+        stickRef.current = "free";
+        pendingJumpRef.current = targetId;
+        const windowStart = Math.max(0, round.startIndex - MIX_JUMP_LEAD_TURNS);
+        setHiddenTurnCount(windowStart);
+        setTailHiddenCount(Math.max(0, turnCount - Math.min(turnCount, windowStart + MIX_JUMP_WINDOW_TURNS)));
+    }, [hiddenTurnCount, tailHiddenCount, turnCount, scrollToTurn]);
+
+    /** 往下续读：放开下面那一截被收起的新内容。新内容只长在视口下面，不用钉锚点 */
+    const loadNewerTurns = useCallback(() => {
+        setTailHiddenCount((count) => Math.max(0, count - MIX_LOAD_MORE_TURNS));
+    }, []);
 
     /** 展开懒加载后，等 DOM 与沙盒高度落定，再把挂着的跳转落下 */
     useEffect(() => {
@@ -1000,15 +1044,33 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
             scrollToTurn(targetId);
         }, 260);
         return () => window.clearTimeout(timer);
-    }, [hiddenTurnCount, rounds.length, scrollToTurn]);
+    }, [hiddenTurnCount, tailHiddenCount, rounds.length, scrollToTurn]);
 
-    /** 滑回最新 */
+    /**
+     * 滑回最新。跳旧剧情留下的那一截"尾部收起"要先放开——但**窗口整体搬到末尾**：
+     * 只把 tail 清 0 而不动 head，等于把从旧剧情一直到最新的全部内容一次渲出来
+     * （实测 415 轮那一局这么干会渲 415 行、2034ms 长任务）。
+     * 落点等 DOM 真长出来再钉一次（直接对旧 scrollHeight 平滑滚动会停在半路）。
+     */
+    const toLatestRef = useRef(false);
     const scrollToLatest = useCallback(() => {
         const el = scrollRef.current;
         if (!el) return;
         setNewCount(0);
+        if (tailHiddenCount > 0) {
+            toLatestRef.current = true;
+            stickRef.current = "bottom";
+            setTailHiddenCount(0);
+            setHiddenTurnCount(Math.max(0, turnCount - MIX_INITIAL_TURNS));
+            return;
+        }
         el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    }, []);
+    }, [tailHiddenCount, turnCount]);
+    useLayoutEffect(() => {
+        if (!toLatestRef.current) return;
+        toLatestRef.current = false;
+        applyStick(true);
+    }, [tailHiddenCount, applyStick]);
 
     /**
      * 罗盘里要标出"你正看着第几轮"。面板关着时不必算（那要跟着滚动逐帧刷），
@@ -1690,7 +1752,7 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
                         查看更早的 {Math.min(MIX_LOAD_MORE_TURNS, hiddenTurnCount)} 条 · 还有 {hiddenTurnCount} 条
                     </button>
                 ) : null}
-                {session.turns.slice(hiddenTurnCount).map((turn, offset) => {
+                {session.turns.slice(hiddenTurnCount, session.turns.length - tailHiddenCount).map((turn, offset) => {
                     const idx = hiddenTurnCount + offset;
                     const isLast = idx === session.turns.length - 1;
                     const actions = (
@@ -1734,6 +1796,11 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
                         </div>
                     );
                 })}
+                {tailHiddenCount > 0 ? (
+                    <button type="button" className="mix-load-more" onClick={loadNewerTurns}>
+                        查看更新的 {Math.min(MIX_LOAD_MORE_TURNS, tailHiddenCount)} 条 · 还有 {tailHiddenCount} 条
+                    </button>
+                ) : null}
                 {busy ? (() => {
                     // 流式过程中同样过一遍「仅显示」滤网，写出来的样子和落库后一致
                     const shown = applyMixFilterRules(mixStreamText(live), assets.filterRules, "display");
@@ -1779,7 +1846,7 @@ export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: Ga
                 <MixStoryRail
                     scrollRef={scrollRef}
                     rounds={rounds}
-                    measureKey={`${sessionId}|${turnCount}|${hiddenTurnCount}|${busy}|${rounds.length}`}
+                    measureKey={`${sessionId}|${turnCount}|${hiddenTurnCount}|${tailHiddenCount}|${busy}|${rounds.length}`}
                     hiddenCount={hiddenTurnCount}
                     newCount={newCount}
                     onOpenCompass={() => setCompassOpen((v) => !v)}
