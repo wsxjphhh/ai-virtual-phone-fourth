@@ -150,7 +150,17 @@
   background-repeat: no-repeat;
   background-position: center;
   background-size: cover;
-  transition: opacity 220ms ease;
+  /* 这里原本有 `transition: opacity 220ms ease`，是「退出任何 App 回桌面都卡一下」的成因之一
+     （另一条是桌面整棵树卸载重建，见本文件下方 .phone-desktop-layer 与 docs/改动记录.md）。
+     打开 App 时壁纸被 .app-open-shell 以 transition-duration:0s 瞬时隐藏，所以这条过渡
+     只在「返回桌面」时生效：桌面整棵树（图标 / Dock / 组件共 30+ 层 backdrop-filter 毛玻璃）
+     与壁纸同帧重建，壁纸淡入的每一帧都让毛玻璃重新采样背景、重新模糊一遍。
+     实测（localhost:3001，22 图标 + 7 组件 + 4 Dock，桌面节点 26ms 就挂好了）：
+       保留淡入 → 掉帧 250ms，其中一条 239ms 的渲染长任务；
+       去掉淡入 → 25ms，零长任务；把淡入拉长到 2s 同样降到 27ms（每帧摊薄即可）。
+     即成本来自「逐帧重模糊」，不是一次性栅格化，React/JS 侧只占 26ms。
+     结论：不做返回淡入，壁纸与桌面同时出现（与打开 App 时的瞬时表现一致）。 */
+  transition: none;
 }
 
 /* ── Status bar ── */
@@ -998,6 +1008,66 @@
   /* hide instantly so it doesn't bleed through transparent app during fade-in */
 }
 
+/* ── 桌面 / Dock 常驻挂载后的隐藏层 ──
+   2026-10-19：桌面与 Dock 从「App 打开即卸载」改为「常驻挂载 + CSS 隐藏」。
+   退出时那两条背靠背长任务（291~308ms React 重挂 + 245~289ms 首帧栅格化）里，
+   第一条靠常驻整条消除；这里只负责把不显示的桌面从布局与绘制中拿掉。
+   注意：必须 display:none 而不是仅 opacity/visibility —— 桌面是 flex 兄弟节点，
+   留在流里会和 .phone-app-pane 抢高度，App 页面会被压成一半。 */
+.phone-desktop-layer {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.phone-workspace.app-open .phone-desktop-layer {
+  display: none;
+}
+
+.phone-shell.app-open-shell .dock {
+  display: none;
+}
+
+/* ── 退出 App 的等待遮罩 ──
+   显形带 220ms 延迟且只动 opacity：动画跑在合成器线程上，主线程被 React 重提交
+   占住时也照样淡入，这正是"卡住时要有反馈"所需要的。收回时不留延迟。 */
+.app-exit-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: rgba(10, 10, 12, 0.58);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms linear 0s;
+  will-change: opacity;
+}
+
+.app-exit-veil.is-on {
+  opacity: 1;
+  transition: opacity 160ms linear 220ms;
+}
+
+.app-exit-veil-spin {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: app-exit-spin 0.8s linear infinite;
+}
+
+@keyframes app-exit-spin {
+  to { transform: rotate(360deg); }
+}
+
 
 /* ── Notice toast ── */
 
@@ -1056,7 +1126,13 @@
 
 /* ── Mobile responsive ── */
 
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+/* 手机端布局入口。判定与 lib/pwa-display-mode.ts 的 MOBILE_PORTRAIT_MEDIA /
+   MOBILE_LANDSCAPE_MEDIA 同源：竖屏按宽度，横屏按"矮视口 + 触摸"。
+   两条查询用逗号（Media Queries 3 的 or 语义）而不是嵌套分组，老内核才不会被整条判 false。
+   少了横屏这条，浏览器把视口转横后宽度就超过 500px，页面掉回 tokens.css 的固定 390×844
+   桌面舞台，844 高的画面塞进 390 高的视口，只剩一小截可见。 */
+@media (max-width: 500px) and (hover: none) and (pointer: coarse),
+       (max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse) {
 
   /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
      data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统
@@ -1086,6 +1162,35 @@
   :root {
     --phone-screen-width: 100vw;
     --phone-screen-height: 100lvh;
+  }
+
+  /* 非沉浸态（浏览器还留着地址栏/工具栏）时，整块画面改贴"当前真正可见的高度"。
+     lvh = 工具栏**收起后**的最大高度，只有全屏里才等于可见高度。
+     2026-10-20 用户实测 Edge："edge可以进入主页了但是无法看见下方功能行（因为无法进入全屏模式）"：
+     Edge 常驻底部工具栏 → 可见高度只有 dvh，而 .phone-shell 按 100lvh 排版、dock 贴在壳底，
+     壳底那条正好掉进被 html/body 的 overflow:hidden 裁掉又滚不动的带子里 → 下方功能行看不见。
+     开机页那次（同一条 min(100dvh,100lvh) 打在 .app-root.splash-root 上）只修了 splash，主屏漏了。
+
+     为什么要用 :not(:fullscreen) 门控、而不是一路换成 dvh：
+     软键盘弹起时 dvh 会缩，聊天那边的抬升逻辑（--mobile-keyboard-lift）假设画面高度不变，
+     全屏 Chrome 用户本来就一切正常，没必要为他们引入一次重排。全屏态 dvh==lvh，这条等于没改。
+     老内核没有 :fullscreen（或只认 -webkit- 前缀）时整条选择器无效 → 退回原来的 100lvh，
+     是"保持已知行为"的降级方向，不会把高度弄没。
+     注意 Lightning CSS 会把 `height:100lvh; height:min(100dvh,…)` 这种同选择器的重复声明
+     **折叠成只剩后一条**（build 产物实测），所以别指望两行写法在产物里当保底——保底靠的是选择器失效。 */
+  html:not(:fullscreen),
+  html:not(:fullscreen) body {
+    height: min(100dvh, 100lvh);
+  }
+
+  html:not(:fullscreen) .app-root {
+    height: min(100dvh, 100lvh);
+  }
+
+  /* .phone-shell 是 dock 的实际排版父级，只改 app-root 不够：壳自己还按 --phone-screen-height 走。
+     这里覆盖外层 `.phone-shell{height:var(--phone-screen-height)}`，全屏态不覆盖、观感不变。 */
+  html:not(:fullscreen) .phone-shell {
+    height: min(100dvh, var(--phone-screen-height));
   }
 
   html,
@@ -1155,6 +1260,18 @@
   .app-root.splash-root {
     width: 100vw;
     height: 100lvh;
+    /* 开机页必须贴"当前可见高度"，不能贴 lvh。
+       --status-bar-drop 是进 App 之后才由 desktop-shell.tsx:4322 挂到壳上的内联变量
+       （主屏靠它把整块画面上移、绕开底部被裁），开机页没有主题、拿到的是默认 0px；
+       而视口口径这时是 100lvh = 地址栏收起后的最大高度。地址栏一直露着的浏览器
+       （Edge 的 minimal-ui，以及任何不请求全屏的壳）实际可见高度只有 dvh/svh，
+     底部那条差值被 html/body 的 overflow:hidden 裁掉又滚不动，正好吃掉
+       bottom:36px 的圆形「进入」按钮 —— 2026-10-20 用户实测 Edge："直接看不见下方的进入按钮，
+       无法进入全屏模式"，主屏却正常，差别就在这里。
+       两行写法：老内核不认 dvh 时第二条整条失效，自动退回上一行的 100lvh；
+       开机页是静态画面，不存在工具栏收起/展开引起回流的重排顾虑。 */
+    height: min(100dvh, 100lvh);
+    --phone-screen-height: min(100dvh, 100lvh);
     margin: 0;
     padding: 0;
     display: flex;
@@ -1162,6 +1279,11 @@
     justify-content: flex-start;
     overflow: hidden;
     background: var(--c-page-body-bg);
+  }
+
+  /* 手势导航条/刘海遮挡区另外垫一段，避免"铺满了但按钮压在半透明条下面"。 */
+  .splash-enter-button {
+    bottom: calc(36px + env(safe-area-inset-bottom, 0px));
   }
 
   .splash-shell-wrap {

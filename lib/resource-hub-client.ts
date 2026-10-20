@@ -675,12 +675,12 @@ export async function importResourceHubFile(
         case "theme": {
             const buffer = await fetchResourceHubBinary(source, path);
             const filename = path.split("/").pop() || "theme.zip";
-            const { installThemePackageFile, THEME_PACKAGE_INSTALLED_EVENT } = await import("./theme-package");
-            // installThemePackageFile 自己就把资源/主题档案/组件/布局都落盘了，
-            // 但桌面上那些 React 状态还是旧的，得派事件让 shell 重新落地一次。
-            const result = await installThemePackageFile(new File([buffer], filename));
-            dispatchWith(THEME_PACKAGE_INSTALLED_EVENT, result);
-            return `主题包已应用：${result.summary.assetCount} 个资源，${result.summary.widgetCount} 个桌面组件`;
+            const { previewThemePackageFile, THEME_PACKAGE_PREVIEW_REQUESTED_EVENT } = await import("./theme-package");
+            // 集市下载也走「先预览再确认」：解析成内存预览对象，派事件请桌面挂预览态，
+            // 用户在桌面预览条点「应用」才落盘（installThemePackageFile 仍是直装 API，留给出程序调用）
+            const preview = await previewThemePackageFile(new File([buffer], filename));
+            dispatchWith(THEME_PACKAGE_PREVIEW_REQUESTED_EVENT, preview);
+            return `主题包《${preview.name}》已进入预览：${preview.summary.assetCount} 个资源，${preview.summary.widgetCount} 个桌面组件。请在桌面点「应用」或「还原」`;
         }
         case "preset_entry":
             // 这条目的地要先选预设和位置，走 fetchPresetEntry + applyPresetEntry 两步，

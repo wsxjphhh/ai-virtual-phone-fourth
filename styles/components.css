@@ -1756,12 +1756,17 @@
   flex-direction: column;
   overflow: hidden;
   color: var(--c-text-title);
-  background: color-mix(in srgb, var(--c-card) 88%, rgba(255,255,255,0.76));
+  /* 底板透明度：dev 下这条规则原本手写了两份 backdrop-filter（标准 + -webkit-），
+     Lightning CSS 会把标准那条折叠掉，而本机 Chromium 只认标准写法 → dev 里完全不糊，
+     0.7 的 --c-card 直接把桌面内容透出来。这里去掉手写前缀（Lightning 会自动补，实测 dev 产物
+     重新拿到 blur(26px)），底板取折中档：blur 生效时是毛玻璃，万一失效也还读得清。 */
+  background: var(--c-panel, #ffffff);
+  background: color-mix(in srgb, var(--c-card, rgba(255, 255, 255, 0.7)) 42%, var(--c-panel, #ffffff) 58%);
   backdrop-filter: blur(26px) saturate(1.18);
-  -webkit-backdrop-filter: blur(26px) saturate(1.18);
+  border: 1px solid color-mix(in srgb, var(--c-card-border, #E0E0E0) 80%, transparent);
   border-radius: 24px;
   box-shadow:
-    0 16px 48px rgba(31, 54, 87, 0.14),
+    0 16px 48px rgba(31, 54, 87, 0.22),
     inset 0 1px 0 rgba(255,255,255,0.38);
   animation: quick-action-pop 180ms ease-out both;
 }

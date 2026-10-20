@@ -24,7 +24,7 @@ import type { DesktopFolderMap, DesktopIconLayout } from "@/lib/desktop-layout-s
 import { CUSTOM_APPS_UPDATED_EVENT, loadInstalledCustomApps } from "@/lib/custom-app-storage";
 import { toCustomAppIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
 import { PageShell } from "@/components/ui/page-shell";
-import { readPwaDisplayPreference, writePwaDisplayPreference } from "@/lib/pwa-display-mode";
+import { readImmersiveFullscreenPolicy, writeImmersiveFullscreenPolicy, readPwaDisplayPreference, writePwaDisplayPreference, type ImmersiveFullscreenPolicy } from "@/lib/pwa-display-mode";
 import {
   GRID_COLS,
   GRID_ROWS,
@@ -55,8 +55,9 @@ import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DIYWidgetEditor } from "@/components/widgets/diy-widget-editor";
 import {
   createThemePackageBlob,
-  installThemePackageFile,
+  previewThemePackageFile,
   resetThemePackageState,
+  type ThemePackagePreview,
 } from "@/lib/theme-package";
 
 type ThemeSection =
@@ -86,6 +87,10 @@ type PhoneThemeAppProps = {
     dock?: DesktopIconId[];
     folders?: DesktopFolderMap;
   }) => void;
+  /** zip 导入先进桌面预览（内存态），由用户在预览条上确认才落盘 */
+  onThemePreviewRequest: (preview: ThemePackagePreview) => void;
+  /** 当前是否已有一份预览挂着的（导入/恢复默认期间用于提示） */
+  themePreviewActive: boolean;
   pageIcons: DesktopIconLayout;
   iconSkins: Record<string, string | null>;
   wallpaperStyle?: CSSProperties;
@@ -185,6 +190,8 @@ export function PhoneThemeApp({
   widgets,
   onWidgetsChange,
   onDesktopThemeChange,
+  onThemePreviewRequest,
+  themePreviewActive,
   pageIcons,
   iconSkins,
   wallpaperStyle,
@@ -201,6 +208,8 @@ export function PhoneThemeApp({
   });
   const [showStatusBarAdjust, setShowStatusBarAdjust] = useState(false);
   const [systemBarShown, setSystemBarShown] = useState(() => typeof document !== "undefined" && readPwaDisplayPreference(document.cookie) === "standalone");
+  // 「全屏与方向锁」：默认 auto（锁得住才全屏）。存 localStorage，与上面那个管装机形态的 cookie 各管各的。
+  const [immersivePolicy, setImmersivePolicy] = useState<ImmersiveFullscreenPolicy>(() => readImmersiveFullscreenPolicy());
   const [showTextAdjust, setShowTextAdjust] = useState(false);
   const [showThemeTransfer, setShowThemeTransfer] = useState(false);
   const [themeTransferBusy, setThemeTransferBusy] = useState(false);
@@ -238,19 +247,20 @@ export function PhoneThemeApp({
 
     setThemeTransferBusy(true);
     try {
-      const result = await installThemePackageFile(file);
-      onDesktopThemeChange({ widgets: result.widgets, iconLayout: result.iconLayout, dock: result.dock, folders: result.folders });
-      await onApply(result.themeProfile);
-      onDraftChange(result.themeProfile);
+      // 只解析不落盘：交给桌面进入预览态，「应用」才写入存储，「还原」零副作用
+      const result = await previewThemePackageFile(file);
       setShowThemeTransfer(false);
-      onNotice(`已导入主题包：${result.summary.assetCount} 个资源，${result.summary.widgetCount} 个桌面组件。`);
+      onThemePreviewRequest(result);
+      onNotice(result.kind === "css-pack"
+        ? `已进入 CSS 美化包预览，回到桌面点「应用」保留效果。`
+        : `已进入《${result.name}》预览，回到桌面点「应用」保留效果。`);
     } catch (error) {
       console.error(error);
-      onNotice(error instanceof Error ? error.message : "主题导入失败");
+      onNotice(error instanceof Error ? error.message : "主题包解析失败");
     } finally {
       setThemeTransferBusy(false);
     }
-  }, [onApply, onDesktopThemeChange, onDraftChange, onNotice]);
+  }, [onNotice, onThemePreviewRequest]);
 
   const handleResetTheme = useCallback(async () => {
     setThemeTransferBusy(true);
@@ -445,12 +455,18 @@ export function PhoneThemeApp({
             <p className="ts-14 text-[var(--c-icon)]">{"\u300C"}{SECTION_TITLES[section]}{"\u300D\u529F\u80FD\u5F00\u53D1\u4E2D\u2026"}</p>
           </div>
         )}
-      {/* 不限定 accept：.ai-theme 是自定义后缀，iOS「文件」选择器会把
-          没有注册 UTI 的类型置灰导致选不中。放开后由 installThemePackageFile
-          校验包内 manifest.json，非法文件照样会被拒。 */}
+      {/* accept 只声明系统能识别的标准 zip 类型 —— 两头都要照顾，缺一不可：
+          ① 安卓 Chrome / WebView / 微信内置：遇到「无 accept」的文件框只会弹
+             「相机 / 相册 / 文件」混合面板，用户进不去系统「文件管理」，也选不到 zip；
+          ② iOS：accept 里一旦带 .ai-theme / .aiphone 这类自定义后缀，「文件」选择器
+             会把没有注册 UTI 的类型直接置灰，反而选不中（这正是此处历史上不写 accept
+             的原因，但那样又牺牲了安卓）。
+          所以只保留两端都认识的标准类型。主题包导出已是标准 .zip，最终仍由
+          previewThemePackageFile 校验包内容（manifest.json 或 .css 文件），非法文件照样会被拒。 */}
       <input
         ref={importFileRef}
         type="file"
+        accept=".zip,application/zip"
         className="hidden"
         onChange={handleImportFileChange}
       />
@@ -468,6 +484,17 @@ export function PhoneThemeApp({
             <p className="ts-13 leading-relaxed text-[var(--c-text)]">
               主题包会包含主题色、壁纸、图标、桌面组件、自定义组件，以及桌面图标和组件位置。
             </p>
+            <p className="ts-11 leading-relaxed text-[var(--c-icon)]">
+              {"点「导入」打开系统文件选择器，选 .zip 即可。导入后先在桌面上预览效果，满意再点「应用」；点「还原」则完全不留痕迹。"}
+            </p>
+            <p className="ts-11 leading-relaxed text-[var(--c-icon)]">
+              {"没有 manifest.json 的社区美化包也支持：包内的 .css 会合并进全局样式，url() 引用的图片/字体会自动从包里读取。"}
+            </p>
+            {themePreviewActive && (
+              <p className="ts-11 leading-relaxed text-[var(--c-warning, #ff9500)]">
+                当前已有一份预览待确认，再次导入将叠加在这份预览之上（「还原」会回到最初的外观）。
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-8 py-1">
               <button
                 type="button"
@@ -478,7 +505,7 @@ export function PhoneThemeApp({
                 <span className="card-icon" style={menuIconStyle(BINDING_ACCENTS.api)}>
                   <Upload size={20} strokeWidth={1.75} />
                 </span>
-                <span>导入</span>
+                <span>导入预览</span>
               </button>
               <button
                 type="button"
@@ -546,6 +573,51 @@ export function PhoneThemeApp({
             </div>
             <p style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-icon)", lineHeight: 1.4 }}>
               {"显示手机系统自己的状态栏（时间/电量/通知），退出沉浸全屏，安卓不再反复弹全屏提示。开启后本页的虚拟状态栏不再显示；已装到桌面的需删除后重新「添加到主屏幕」才完全生效。"}
+            </p>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
+              <span style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: "var(--c-text)" }}>{"全屏与方向锁"}</span>
+            </div>
+            {/* 三态而不是开关：全屏和"锁得住方向"是绑在一起的——只有进了全屏，浏览器才允许
+                网页锁方向；而部分国产壳接受全屏却拒绝锁方向，全屏就变成了"画面躺倒 + 连地址栏都没有"。
+                默认口径按能不能锁住自动决定，另外两态把取舍交回用户手里。 */}
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              {([
+                { value: "auto", label: "自动" },
+                { value: "always", label: "总是全屏" },
+                { value: "never", label: "从不全屏" },
+              ] as const).map((opt) => {
+                const active = immersivePolicy === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => {
+                      setImmersivePolicy(opt.value);
+                      writeImmersiveFullscreenPolicy(opt.value);
+                      onNotice(opt.value === "auto"
+                        ? "已设为自动：锁得住方向才保持沉浸全屏，锁不住就自动退回浏览器界面（不会躺倒）"
+                        : opt.value === "always"
+                          ? "已设为总是全屏：一直保持沉浸，方向交给浏览器自己决定（可能被转成横屏）"
+                          : "已设为从不全屏：一定保持竖屏，代价是浏览器地址栏一直在");
+                    }}
+                    className="flex-1 rounded-full"
+                    style={{
+                      padding: "7px 0",
+                      fontSize: "calc(12px*var(--app-text-scale,1))",
+                      fontWeight: active ? 600 : 400,
+                      color: active ? "#fff" : "var(--c-text)",
+                      background: active ? "var(--c-success)" : "var(--c-page-body-bg)",
+                      border: active ? "none" : "1px solid var(--c-input-border)",
+                      transition: "0.2s",
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-icon)", lineHeight: 1.4 }}>
+              {"网页要锁住竖屏，必须先拿到全屏权限，所以这两件事只能一起要或一起不要。自动＝锁得住方向的浏览器保持沉浸全屏，锁不住的自动退回浏览器界面（宁可露地址栏也不能躺倒）；总是全屏＝一直保持沉浸，横屏风险由浏览器决定；从不全屏＝一定竖屏，但地址栏一直在。选错了当场生效，不用重新加载。"}
             </p>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: "var(--c-text)" }}>{"顶部偏移"}</span>
