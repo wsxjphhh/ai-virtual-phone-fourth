@@ -8,6 +8,7 @@ import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/d
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
 import { bgTimerCleanup } from "@/lib/bg-timer";
+import { isMobilePhoneViewport } from "@/lib/pwa-display-mode";
 import { PhonePlaceholderApp } from "@/components/phone-placeholder-app";
 import MusicPlayer from "@/components/music/music-player";
 import MusicFloat from "@/components/music/music-float";
@@ -967,7 +968,6 @@ function useAndroidCaretKeyboardLift() {
       return;
     }
 
-    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
     const viewport = window.visualViewport;
     let focusedElement: HTMLElement | null = null;
     let raf = 0;
@@ -987,7 +987,7 @@ function useAndroidCaretKeyboardLift() {
     const update = () => {
       raf = 0;
       const element = focusedElement;
-      if (!element || document.activeElement !== element || !mobileMq.matches || !viewport) {
+      if (!element || document.activeElement !== element || !isMobilePhoneViewport() || !viewport) {
         applyLift(0);
         return;
       }

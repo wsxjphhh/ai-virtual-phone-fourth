@@ -1126,7 +1126,13 @@
 
 /* ── Mobile responsive ── */
 
-@media (max-width: 500px) and (hover: none) and (pointer: coarse) {
+/* 手机端布局入口。判定与 lib/pwa-display-mode.ts 的 MOBILE_PORTRAIT_MEDIA /
+   MOBILE_LANDSCAPE_MEDIA 同源：竖屏按宽度，横屏按"矮视口 + 触摸"。
+   两条查询用逗号（Media Queries 3 的 or 语义）而不是嵌套分组，老内核才不会被整条判 false。
+   少了横屏这条，浏览器把视口转横后宽度就超过 500px，页面掉回 tokens.css 的固定 390×844
+   桌面舞台，844 高的画面塞进 390 高的视口，只剩一小截可见。 */
+@media (max-width: 500px) and (hover: none) and (pointer: coarse),
+       (max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse) {
 
   /* 用户在设置里显式开启「显示系统状态栏」且运行时不在全屏时，控制器才会挂
      data-pwa-display-mode 标记（见 pwa-manifest-injector）：此时所有 App 共用系统

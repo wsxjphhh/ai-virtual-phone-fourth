@@ -15,7 +15,7 @@ import { hydrateKvDb, isKvHydrated } from "@/lib/kv-db";
 import { getThemeAssetMap, readThemeProfile } from "@/lib/theme-storage";
 import { resolveActiveIconSkins, type ThemeProfile } from "@/lib/theme-types";
 import { hasPendingMcpOAuthCallback } from "@/lib/tool-executor";
-import { shouldRequestPwaFullscreen } from "@/lib/pwa-display-mode";
+import { isMobilePhoneViewport, requestMobileImmersiveFullscreen } from "@/lib/pwa-display-mode";
 
 const TEXT = {
   loading: "\u52A0\u8F7D\u4E2D...",
@@ -219,16 +219,13 @@ export function MainApp() {
     })();
 
     // 安卓全屏兜底。是否请求全屏在每次点击时读取，设置切换后无需重载。
-    const isMobile = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)").matches;
+    const isMobile = isMobilePhoneViewport();
     if (!isMobile) return () => {
       cancelled = true;
     };
 
     function tryFullscreen() {
-      if (!shouldRequestPwaFullscreen()) return;
-      const doc = document.documentElement;
-      if (document.fullscreenElement) return;
-      doc.requestFullscreen?.().catch(() => { });
+      requestMobileImmersiveFullscreen();
     }
     document.addEventListener("click", tryFullscreen);
     return () => {

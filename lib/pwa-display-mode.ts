@@ -58,6 +58,59 @@ export function shouldRequestPwaFullscreen(): boolean {
   return !/Edg/i.test(navigator.userAgent);
 }
 
+/** ── 手机端布局判定（唯一入口，CSS 的 phone-shell 媒体查询与此保持同源） ──
+ *  竖屏看视口宽度；横屏改看"矮视口 + 触摸"：手机横屏高约 390，平板横屏 600 以上，
+ *  用 max-height 能把平板留在桌面舞台。
+ *  刻意拆成两条 Level 3 查询而不是用 `or` 分组——老内核解析不了整条查询时会整条判 false，
+ *  手机布局会被直接丢掉（这正是"横屏后掉回 390×844 桌面壳、只看得见一小截"的成因）。 */
+export const MOBILE_PORTRAIT_MEDIA = "(max-width: 500px) and (hover: none) and (pointer: coarse)";
+export const MOBILE_LANDSCAPE_MEDIA =
+  "(max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse)";
+
+export function isMobilePhoneViewport(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.matchMedia(MOBILE_PORTRAIT_MEDIA).matches
+    || window.matchMedia(MOBILE_LANDSCAPE_MEDIA).matches;
+}
+
+/** 当前视口是否横向；screen.orientation.type 更准，拿不到时退回宽高比较。 */
+function isViewportLandscape(): boolean {
+  if (typeof window === "undefined") return false;
+  const type = screen?.orientation?.type;
+  if (type) return type.startsWith("landscape");
+  return window.innerWidth > window.innerHeight;
+}
+
+/** 进全屏后把方向锁回竖屏。全屏态才允许 lock，所以只能在 requestFullscreen 成功后调；
+ *  iOS Safari 与老内核没有 screen.orientation.lock，catch 掉即可，不影响全屏本身。 */
+function lockPortraitIfSupported(): void {
+  if (typeof screen === "undefined") return;
+  const orientation = screen.orientation as
+    (ScreenOrientation & { lock?: (value: string) => Promise<void> }) | undefined;
+  if (!orientation?.lock) return;
+  try {
+    orientation.lock("portrait").catch(() => { });
+  } catch {
+    /* 部分浏览器在非用户手势里调用会直接 throw，忽略 */
+  }
+}
+
+/** 沉浸全屏请求：偏好关闭、已在全屏、或视口本来就是横向的（说明方向不归我们管，
+ *  再请求只会把画面推进全屏横屏这种没法用的状态）都跳过。 */
+export function requestMobileImmersiveFullscreen(): void {
+  if (typeof document === "undefined") return;
+  if (!shouldRequestPwaFullscreen()) return;
+  if (document.fullscreenElement) return;
+  if (isViewportLandscape()) return;
+  const doc = document.documentElement;
+  const request = doc.requestFullscreen?.();
+  if (request && typeof request.then === "function") {
+    request.then(lockPortraitIfSupported).catch(() => { });
+  } else {
+    lockPortraitIfSupported();
+  }
+}
+
 export function getRuntimePwaDisplayMode(): RuntimePwaDisplayMode {
   if (typeof window === "undefined" || typeof document === "undefined") return "browser";
   if (document.fullscreenElement || window.matchMedia("(display-mode: fullscreen)").matches) {
