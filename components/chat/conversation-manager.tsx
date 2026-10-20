@@ -149,6 +149,7 @@ export function ConversationManager({ currentSession, onClose, onSelectSession }
             });
             const created = createChatSession(contactId, {
                 title: `对话 ${nextIndex}（续）`,
+                chatAccountId: currentSession.chatAccountId || null,
                 parentSessionId: currentSession.id,
                 rootSessionId: currentSession.rootSessionId || currentSession.id,
             });
