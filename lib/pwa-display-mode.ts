@@ -58,6 +58,44 @@ export function shouldRequestPwaFullscreen(): boolean {
   return !/Edg/i.test(navigator.userAgent);
 }
 
+/** ── 「全屏与方向锁」用户可选策略 ──
+ *  全屏和锁方向是绑在一起的：只有进了全屏，`screen.orientation.lock` 才被允许；
+ *  而不少国产壳接受全屏却拒绝锁方向（2026-10-20 真机日志实测），于是全屏变成了
+ *  "画面躺倒 + 连地址栏都没有"。默认口径是"锁不住就退回浏览器态"——竖屏可用优先。
+ *  这里给设置面板留出反悔的口子：
+ *  - auto   默认。请求全屏，锁得住才留；锁不住立刻退出全屏（露地址栏但绝不躺倒）。
+ *  - always 沉浸优先。锁不住也留在全屏里，方向交给浏览器自己（横屏风险自负）。
+ *  - never  从不请求全屏。一定竖屏，代价是浏览器界面一直在。
+ *  存 localStorage 而不是 cookie：这是纯端上的显示策略，不参与 manifest 计算
+ *  （装到桌面的形态归上面那个 cookie 管），也不需要服务端知道。 */
+export const IMMERSIVE_POLICY_STORAGE_KEY = "aiphone_immersive_fullscreen_policy";
+export const IMMERSIVE_POLICY_CHANGED_EVENT = "aiphone-immersive-fullscreen-policy-changed";
+export type ImmersiveFullscreenPolicy = "auto" | "always" | "never";
+const IMMERSIVE_POLICIES: ImmersiveFullscreenPolicy[] = ["auto", "always", "never"];
+
+export function readImmersiveFullscreenPolicy(): ImmersiveFullscreenPolicy {
+  if (typeof window === "undefined") return "auto";
+  try {
+    const raw = window.localStorage.getItem(IMMERSIVE_POLICY_STORAGE_KEY);
+    return IMMERSIVE_POLICIES.includes(raw as ImmersiveFullscreenPolicy)
+      ? (raw as ImmersiveFullscreenPolicy)
+      : "auto";
+  } catch {
+    /* 无痕模式 / 存储被禁：按默认口径走 */
+    return "auto";
+  }
+}
+
+export function writeImmersiveFullscreenPolicy(policy: ImmersiveFullscreenPolicy) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(IMMERSIVE_POLICY_STORAGE_KEY, policy);
+  } catch {
+    /* 写不进去也不阻塞 UI，本次会话按默认口径继续 */
+  }
+  window.dispatchEvent(new CustomEvent(IMMERSIVE_POLICY_CHANGED_EVENT, { detail: policy }));
+}
+
 /** ── 手机端布局判定（唯一入口，CSS 的 phone-shell 媒体查询与此保持同源） ──
  *  竖屏看视口宽度；横屏改看"矮视口 + 触摸"：手机横屏高约 390，平板横屏 600 以上，
  *  用 max-height 能把平板留在桌面舞台。
@@ -124,20 +162,24 @@ async function exitFullscreenQuietly(): Promise<void> {
 }
 
 /** 借一次用户手势确认"全屏 + 竖屏"能不能同时成立：能就留全屏，不能就退回浏览器态。
- *  调用点都在 click 里，requestFullscreen / orientation.lock 需要的用户激活是够的。 */
+ *  调用点都在 click 里，requestFullscreen / orientation.lock 需要的用户激活是够的。
+ *  策略为 always（沉浸优先）时，锁不住也留在全屏里——那是用户在设置里明确选的取舍。 */
 async function securePortraitInsideFullscreen(): Promise<void> {
   const locked = await tryLockPortrait();
+  const immersiveFirst = readImmersiveFullscreenPolicy() === "always";
   portraitLockState = locked ? "locked" : "unsupported";
-  if (!locked) await exitFullscreenQuietly();
+  if (!locked && !immersiveFirst) await exitFullscreenQuietly();
 }
 
 /** 全屏态下视口转横的兜底：连 screen.orientation.lock 报成功却仍然转横的壳
  *  （"接受但不生效"那一种），也不能让她停在没法用的画面里。退出全屏后壳一般会转回竖屏。
- *  退一次就把状态判死，免得下一次点击又请求全屏→又转横→又退，来回抖。 */
+ *  退一次就把状态判死，免得下一次点击又请求全屏→又转横→又退，来回抖。
+ *  只服务于默认口径：always 是用户自愿承担横屏换沉浸，never 本来就不会在全屏里。 */
 function bindLandscapeWatchdog(): void {
   if (typeof window === "undefined" || landscapeWatchdogBound) return;
   landscapeWatchdogBound = true;
   const onMaybeLandscape = () => {
+    if (readImmersiveFullscreenPolicy() !== "auto") return;
     if (portraitLockState === "unsupported") return;
     if (!document.fullscreenElement || !isViewportLandscape()) return;
     portraitLockState = "unsupported";
@@ -145,15 +187,25 @@ function bindLandscapeWatchdog(): void {
   };
   window.addEventListener("orientationchange", onMaybeLandscape);
   window.addEventListener("resize", onMaybeLandscape);
+  // 设置里改策略要当场生效：判死记录清零（换成 always/never 后不该沿用旧的探测结论）；
+  // 切到 never 时若此刻正处在我们请求来的全屏里，立刻退出来，不用等下一次点击。
+  window.addEventListener(IMMERSIVE_POLICY_CHANGED_EVENT, (event) => {
+    const detail = (event as CustomEvent<string>).detail;
+    portraitLockState = "unknown";
+    if (detail === "never" && document.fullscreenElement) void exitFullscreenQuietly();
+  });
 }
 
-/** 沉浸全屏请求：偏好关闭、本机已证明锁不住竖屏、或视口本来就是横向的都不请求；
- *  已经在全屏里则用来补锁（上一次进入时可能还没走到这一步）。 */
+/** 沉浸全屏请求：偏好关闭、策略选了"从不全屏"、本机已证明锁不住竖屏、
+ *  或视口本来就是横向的都不请求；已经在全屏里则用来补锁（上一次进入时可能还没走到这一步）。 */
 export function requestMobileImmersiveFullscreen(): void {
   if (typeof document === "undefined") return;
   bindLandscapeWatchdog();
   if (!shouldRequestPwaFullscreen()) return;
-  if (portraitLockState === "unsupported") return;
+  const policy = readImmersiveFullscreenPolicy();
+  if (policy === "never") return;
+  // 判死只对默认口径生效：always 是"无论如何都要沉浸"，每次点击都该继续试。
+  if (policy !== "always" && portraitLockState === "unsupported") return;
   if (isViewportLandscape()) {
     // 僵局的入口：进来就已经是横屏全屏（旧版本留下的状态），用这次手势把它拉回竖屏。
     if (document.fullscreenElement) void securePortraitInsideFullscreen();

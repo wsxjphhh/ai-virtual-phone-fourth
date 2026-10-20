@@ -24,7 +24,7 @@ import type { DesktopFolderMap, DesktopIconLayout } from "@/lib/desktop-layout-s
 import { CUSTOM_APPS_UPDATED_EVENT, loadInstalledCustomApps } from "@/lib/custom-app-storage";
 import { toCustomAppIconId, type InstalledCustomApp } from "@/lib/custom-app-types";
 import { PageShell } from "@/components/ui/page-shell";
-import { readPwaDisplayPreference, writePwaDisplayPreference } from "@/lib/pwa-display-mode";
+import { readImmersiveFullscreenPolicy, writeImmersiveFullscreenPolicy, readPwaDisplayPreference, writePwaDisplayPreference, type ImmersiveFullscreenPolicy } from "@/lib/pwa-display-mode";
 import {
   GRID_COLS,
   GRID_ROWS,
@@ -201,6 +201,8 @@ export function PhoneThemeApp({
   });
   const [showStatusBarAdjust, setShowStatusBarAdjust] = useState(false);
   const [systemBarShown, setSystemBarShown] = useState(() => typeof document !== "undefined" && readPwaDisplayPreference(document.cookie) === "standalone");
+  // 「全屏与方向锁」：默认 auto（锁得住才全屏）。存 localStorage，与上面那个管装机形态的 cookie 各管各的。
+  const [immersivePolicy, setImmersivePolicy] = useState<ImmersiveFullscreenPolicy>(() => readImmersiveFullscreenPolicy());
   const [showTextAdjust, setShowTextAdjust] = useState(false);
   const [showThemeTransfer, setShowThemeTransfer] = useState(false);
   const [themeTransferBusy, setThemeTransferBusy] = useState(false);
@@ -555,6 +557,51 @@ export function PhoneThemeApp({
             </div>
             <p style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-icon)", lineHeight: 1.4 }}>
               {"显示手机系统自己的状态栏（时间/电量/通知），退出沉浸全屏，安卓不再反复弹全屏提示。开启后本页的虚拟状态栏不再显示；已装到桌面的需删除后重新「添加到主屏幕」才完全生效。"}
+            </p>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
+              <span style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: "var(--c-text)" }}>{"全屏与方向锁"}</span>
+            </div>
+            {/* 三态而不是开关：全屏和"锁得住方向"是绑在一起的——只有进了全屏，浏览器才允许
+                网页锁方向；而部分国产壳接受全屏却拒绝锁方向，全屏就变成了"画面躺倒 + 连地址栏都没有"。
+                默认口径按能不能锁住自动决定，另外两态把取舍交回用户手里。 */}
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              {([
+                { value: "auto", label: "自动" },
+                { value: "always", label: "总是全屏" },
+                { value: "never", label: "从不全屏" },
+              ] as const).map((opt) => {
+                const active = immersivePolicy === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => {
+                      setImmersivePolicy(opt.value);
+                      writeImmersiveFullscreenPolicy(opt.value);
+                      onNotice(opt.value === "auto"
+                        ? "已设为自动：锁得住方向才保持沉浸全屏，锁不住就自动退回浏览器界面（不会躺倒）"
+                        : opt.value === "always"
+                          ? "已设为总是全屏：一直保持沉浸，方向交给浏览器自己决定（可能被转成横屏）"
+                          : "已设为从不全屏：一定保持竖屏，代价是浏览器地址栏一直在");
+                    }}
+                    className="flex-1 rounded-full"
+                    style={{
+                      padding: "7px 0",
+                      fontSize: "calc(12px*var(--app-text-scale,1))",
+                      fontWeight: active ? 600 : 400,
+                      color: active ? "#fff" : "var(--c-text)",
+                      background: active ? "var(--c-success)" : "var(--c-page-body-bg)",
+                      border: active ? "none" : "1px solid var(--c-input-border)",
+                      transition: "0.2s",
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "var(--c-icon)", lineHeight: 1.4 }}>
+              {"网页要锁住竖屏，必须先拿到全屏权限，所以这两件事只能一起要或一起不要。自动＝锁得住方向的浏览器保持沉浸全屏，锁不住的自动退回浏览器界面（宁可露地址栏也不能躺倒）；总是全屏＝一直保持沉浸，横屏风险由浏览器决定；从不全屏＝一定竖屏，但地址栏一直在。选错了当场生效，不用重新加载。"}
             </p>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: "calc(13px*var(--app-text-scale,1))", color: "var(--c-text)" }}>{"顶部偏移"}</span>

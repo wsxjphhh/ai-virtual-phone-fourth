@@ -1231,6 +1231,18 @@
   .app-root.splash-root {
     width: 100vw;
     height: 100lvh;
+    /* 开机页必须贴"当前可见高度"，不能贴 lvh。
+       --status-bar-drop 是进 App 之后才由 desktop-shell.tsx:4322 挂到壳上的内联变量
+       （主屏靠它把整块画面上移、绕开底部被裁），开机页没有主题、拿到的是默认 0px；
+       而视口口径这时是 100lvh = 地址栏收起后的最大高度。地址栏一直露着的浏览器
+       （Edge 的 minimal-ui，以及任何不请求全屏的壳）实际可见高度只有 dvh/svh，
+     底部那条差值被 html/body 的 overflow:hidden 裁掉又滚不动，正好吃掉
+       bottom:36px 的圆形「进入」按钮 —— 2026-10-20 用户实测 Edge："直接看不见下方的进入按钮，
+       无法进入全屏模式"，主屏却正常，差别就在这里。
+       两行写法：老内核不认 dvh 时第二条整条失效，自动退回上一行的 100lvh；
+       开机页是静态画面，不存在工具栏收起/展开引起回流的重排顾虑。 */
+    height: min(100dvh, 100lvh);
+    --phone-screen-height: min(100dvh, 100lvh);
     margin: 0;
     padding: 0;
     display: flex;
@@ -1238,6 +1250,11 @@
     justify-content: flex-start;
     overflow: hidden;
     background: var(--c-page-body-bg);
+  }
+
+  /* 手势导航条/刘海遮挡区另外垫一段，避免"铺满了但按钮压在半透明条下面"。 */
+  .splash-enter-button {
+    bottom: calc(36px + env(safe-area-inset-bottom, 0px));
   }
 
   .splash-shell-wrap {
