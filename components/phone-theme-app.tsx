@@ -435,6 +435,20 @@ export function PhoneThemeApp({
                     </div>
                   );
                 })()}
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => setShowStatusBarAdjust(true)}
+                >
+                  <span className="card-icon card-icon-glass"><GlassIcon name="status-bar" /></span>
+                  <span className="min-w-0 flex-1 text-left">
+                    <span className="menu-label appearance-menu-item-label block">全屏与方向锁</span>
+                    <span className="mt-0.5 block ts-10 text-[var(--c-icon)]">
+                      {immersivePolicy === "always" ? "总是全屏" : immersivePolicy === "never" ? "从不全屏" : "自动"}
+                    </span>
+                  </span>
+                  <IconChevronRight />
+                </button>
                 {MENU_ITEMS.filter(item => ["text"].includes(item.section)).map((item) => (
                   <button
                     key={item.section}
