@@ -3,6 +3,7 @@ import {
   appendMissingCustomAppIcons,
   createDefaultDesktopIconLayout,
   getDesktopIconLayoutItems,
+  ICON_LAYOUT_STORAGE_KEY,
   loadDesktopFolders,
   loadDockLayout,
   normalizeDesktopFolders,
@@ -24,7 +25,9 @@ import {
   type ThemeAssetRecord
 } from "@/lib/theme-storage";
 import { GRID_COLS, GRID_ROWS, WIDGET_SIZE_CELLS, type DIYTemplateSlot, type DIYWidgetTemplate, type WidgetInstance, type WidgetSize } from "@/lib/widget-types";
-import { createDefaultWidgets, loadDIYTemplates, saveDIYTemplates, saveWidgets } from "@/lib/widget-storage";
+import { createDefaultWidgets, loadDIYTemplates, loadWidgets, saveDIYTemplates, saveWidgets } from "@/lib/widget-storage";
+import { kvGet } from "@/lib/kv-db";
+import type JSZip from "jszip";
 
 const PACKAGE_SCHEMA = "ai-phone-theme-package";
 const PACKAGE_VERSION = 1;
@@ -381,8 +384,7 @@ function packageFileName(themeProfile: ThemeProfile): string {
 }
 
 async function loadZip(file: File) {
-  const JSZip = (await import("jszip")).default;
-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const zip = await openZip(file);
   const manifestFile = zip.file("manifest.json");
   if (!manifestFile) {
     throw new Error("主题包缺少 manifest.json");
@@ -390,6 +392,279 @@ async function loadZip(file: File) {
 
   const rawManifest = safeJsonParse(await manifestFile.async("text"));
   return { zip, manifest: normalizeManifest(rawManifest) };
+}
+
+async function openZip(file: File): Promise<JSZip> {
+  const JSZipCtor = (await import("jszip")).default;
+  return JSZipCtor.loadAsync(await file.arrayBuffer());
+}
+
+/* ═══════════════════════════════════════════
+   美化包预览（内存态，不落盘）
+   - 标准包：manifest.json + assets/，与导出格式一致
+   - 社区 css 包：无 manifest 也能进——zip 里的 *.css 合并进
+     globalCustomCSS，url() 相对引用改写为包内文件的 dataURL
+   - 预览只读 zip、只产内存对象；应用（commit）才写存储
+   ═══════════════════════════════════════════ */
+
+const CSS_FILE_MAX_BYTES = 1024 * 1024;      // 单个 .css 上限 1MB
+const CSS_URL_FILE_MAX_BYTES = 12 * 1024 * 1024; // url() 内联的单个文件上限 12MB
+const CSS_FILE_MAX_COUNT = 8;
+
+const MIME_BY_EXT: Record<string, string> = {
+  css: "text/css",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  svg: "image/svg+xml",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  woff: "font/woff",
+  woff2: "font/woff2"
+};
+
+function mimeForPath(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return MIME_BY_EXT[ext] ?? "application/octet-stream";
+}
+
+function normalizeRelPath(dir: string, ref: string): string {
+  const clean = ref.replace(/[?#].*$/, "").replace(/^["']|["']$/g, "").trim();
+  if (!clean || /^[a-z][a-z0-9+.-]*:/i.test(clean) || clean.startsWith("//") || clean.startsWith("data:") || clean.startsWith("/")) {
+    return "";
+  }
+  const parts = (dir ? `${dir}/` : "") + clean;
+  const out: string[] = [];
+  for (const seg of parts.split("/")) {
+    if (seg === "." || seg === "") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return out.join("/");
+}
+
+/** 在 zip 里找一个引用路径：先精确相对路径，再退化到全包同名文件 */
+function findZipFile(zip: JSZip, dir: string, ref: string): { path: string; file: JSZip.JSZipObject } | null {
+  const normalized = normalizeRelPath(dir, ref);
+  if (!normalized) return null;
+  const direct = zip.file(normalized);
+  if (direct) return { path: normalized, file: direct };
+  const base = normalized.split("/").pop() ?? normalized;
+  let fallback: { path: string; file: JSZip.JSZipObject } | null = null;
+  zip.forEach((path, entry) => {
+    if (!fallback && !entry.dir && path.split("/").pop() === base) fallback = { path, file: entry };
+  });
+  return fallback;
+}
+
+async function inlineCssUrls(css: string, cssPath: string, zip: JSZip): Promise<string> {
+  const dir = cssPath.includes("/") ? cssPath.slice(0, cssPath.lastIndexOf("/")) : "";
+  // 先收集全部可解析引用，再并行取 base64
+  const refs = new Map<string, string>();
+  const pattern = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(css)) !== null) {
+    const raw = (match[2] ?? "").trim();
+    if (!raw || refs.has(raw)) continue;
+    const found = findZipFile(zip, dir, raw);
+    if (found) refs.set(raw, found.path);
+  }
+  if (refs.size === 0) return css;
+
+  const dataUrls = new Map<string, string>();
+  await Promise.all([...refs.entries()].map(async ([raw, path]) => {
+    const file = zip.file(path);
+    if (!file) return;
+    const content = await file.async("uint8array");
+    if (content.byteLength > CSS_URL_FILE_MAX_BYTES) return;
+    const base64 = await file.async("base64");
+    dataUrls.set(raw, `data:${mimeForPath(path)};base64,${base64}`);
+  }));
+
+  return css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (full, _quote: string | undefined, raw: string) => {
+    const dataUrl = dataUrls.get((raw ?? "").trim());
+    return dataUrl ? `url("${dataUrl}")` : full;
+  });
+}
+
+async function collectPackCss(zip: JSZip): Promise<string> {
+  const cssEntries: { path: string; file: JSZip.JSZipObject }[] = [];
+  zip.forEach((path, entry) => {
+    if (entry.dir || !/\.css$/i.test(path) || path === "manifest.json") return;
+    if (cssEntries.length >= CSS_FILE_MAX_COUNT) return;
+    cssEntries.push({ path, file: entry });
+  });
+  cssEntries.sort((a, b) => a.path.localeCompare(b.path));
+
+  const chunks: string[] = [];
+  for (const { path, file } of cssEntries) {
+    const text = await file.async("string");
+    if (!text.trim()) continue;
+    if (new TextEncoder().encode(text).byteLength > CSS_FILE_MAX_BYTES) {
+      throw new Error(`美化包 CSS 超过 1MB：${path}`);
+    }
+    chunks.push(`/* ${path} */\n${await inlineCssUrls(text, path, zip)}`);
+  }
+  return chunks.join("\n\n");
+}
+
+function currentDesktopSnapshot(): ThemePackagePreview["desktop"] {
+  const folders = loadDesktopFolders();
+  let layout: DesktopIconLayout;
+  try {
+    const raw = kvGet(ICON_LAYOUT_STORAGE_KEY);
+    layout = raw ? normalizeDesktopIconLayout(JSON.parse(raw), new Set(Object.keys(folders))) : createDefaultDesktopIconLayout();
+  } catch {
+    layout = createDefaultDesktopIconLayout();
+  }
+  return {
+    iconLayout: layout,
+    widgets: loadWidgets(),
+    diyTemplates: loadDIYTemplates(),
+    dock: loadDockLayout(),
+    folders
+  };
+}
+
+export type ThemePackagePreview = {
+  /** package：标准主题包；css-pack：无 manifest 的纯美化 css 包 */
+  kind: "package" | "css-pack";
+  name: string;
+  exportedAt?: string;
+  themeProfile: ThemeProfile;
+  /** css-pack 也带当前桌面快照，应用时原样回写，不动布局 */
+  desktop: ThemePackagePreviewDesktop;
+  assets: ThemeAssetRecord[];
+  /** 从 zip 内 .css 文件合并进来的字节数（0 = 没合） */
+  mergedCssBytes: number;
+  summary: ThemePackageSummary;
+};
+
+type ThemePackagePreviewDesktop = {
+  iconLayout: DesktopIconLayout;
+  widgets: WidgetInstance[];
+  diyTemplates: DIYWidgetTemplate[];
+  dock?: DesktopIconId[];
+  folders?: DesktopFolderMap;
+};
+
+export async function previewThemePackageFile(file: File): Promise<ThemePackagePreview> {
+  const zip = await openZip(file);
+  const manifestFile = zip.file("manifest.json");
+  const fallbackName = file.name.replace(/\.(zip|ai-theme|aiphone)$/i, "") || "未命名美化包";
+
+  if (!manifestFile) {
+    // 纯 css 美化包：只换 CSS，不动桌面/资产
+    const mergedCss = await collectPackCss(zip);
+    if (!mergedCss) {
+      throw new Error("不是可识别的主题包：缺少 manifest.json，也没有 .css 文件");
+    }
+    const current = normalizeThemeProfile(readThemeProfile());
+    const themeProfile = normalizeThemeProfile({
+      ...current,
+      name: current.name || fallbackName,
+      globalCustomCSS: current.globalCustomCSS
+        ? `${current.globalCustomCSS}\n\n/* 美化包：${fallbackName} */\n${mergedCss}`
+        : mergedCss
+    });
+    const desktop = currentDesktopSnapshot();
+    return {
+      kind: "css-pack",
+      name: fallbackName,
+      themeProfile,
+      desktop,
+      assets: [],
+      mergedCssBytes: mergedCss.length,
+      summary: makeSummary({
+        schema: PACKAGE_SCHEMA,
+        version: PACKAGE_VERSION,
+        exportedAt: new Date().toISOString(),
+        themeProfile,
+        desktop,
+        assets: []
+      })
+    };
+  }
+
+  const manifest = normalizeManifest(safeJsonParse(await manifestFile.async("text")));
+
+  const assets: ThemeAssetRecord[] = [];
+  for (const asset of manifest.assets) {
+    const assetFile = zip.file(asset.path);
+    if (!assetFile) {
+      throw new Error(`主题包缺少资源：${asset.path}`);
+    }
+    const base64 = await assetFile.async("base64");
+    assets.push({
+      id: asset.id,
+      type: asset.type,
+      mimeType: asset.mimeType,
+      dataUrl: `data:${asset.mimeType};base64,${base64}`,
+      updatedAt: asset.updatedAt
+    });
+  }
+
+  // 包里附带 .css 且档案本身没写 globalCustomCSS 时合并进来；
+  // 档案自带 CSS 的（我们的导出）以档案为准，避免导出再导入时翻倍
+  let themeProfile = manifest.themeProfile;
+  let mergedCssBytes = 0;
+  if (!themeProfile.globalCustomCSS.trim()) {
+    const merged = await collectPackCss(zip);
+    if (merged) {
+      themeProfile = normalizeThemeProfile({ ...themeProfile, globalCustomCSS: merged });
+      mergedCssBytes = merged.length;
+    }
+  }
+
+  // 主题包布局不含本机安装的自定义 app 图标，补回空位，避免导入后 app 从桌面消失
+  const packageDock = manifest.desktop.dock ?? loadDockLayout();
+  const packageFolderIds = manifest.desktop.folders ? new Set(Object.keys(manifest.desktop.folders)) : undefined;
+  const folderMembers = Object.values(manifest.desktop.folders ?? {}).flatMap((f) => f.icons);
+  const iconLayout = appendMissingCustomAppIcons(
+    manifest.desktop.iconLayout,
+    manifest.desktop.widgets,
+    [...packageDock, ...folderMembers]
+  );
+
+  const previewManifest = { ...manifest, themeProfile, desktop: { ...manifest.desktop, iconLayout } };
+  return {
+    kind: "package",
+    name: themeProfile.name || fallbackName,
+    exportedAt: manifest.exportedAt,
+    themeProfile,
+    desktop: {
+      iconLayout,
+      widgets: manifest.desktop.widgets,
+      diyTemplates: manifest.desktop.diyTemplates,
+      dock: manifest.desktop.dock,
+      folders: manifest.desktop.folders
+    },
+    assets,
+    mergedCssBytes,
+    summary: makeSummary(previewManifest)
+  };
+}
+
+/** 预览确认后落盘：资产进 IndexedDB、DIY 模板入库，返回给桌面做持久化替换。
+ *  主题档案与桌面布局的落盘由调用方（applyTheme / handleThemeDesktopChange）完成。
+ *  css-pack 的 desktop 只是解析当刻的现状快照，绝不能反写 DIY 模板——
+ *  预览期间用户可能又编辑了模板，以存储里的最新值为准。 */
+export async function commitThemePackagePreview(preview: ThemePackagePreview): Promise<InstalledThemePackage> {
+  await writeThemeAssetRecords(preview.assets);
+  if (preview.kind === "package") {
+    saveDIYTemplates(preview.desktop.diyTemplates);
+  }
+  return {
+    themeProfile: preview.themeProfile,
+    iconLayout: preview.desktop.iconLayout,
+    widgets: preview.desktop.widgets,
+    diyTemplates: preview.desktop.diyTemplates,
+    dock: preview.desktop.dock,
+    folders: preview.desktop.folders,
+    summary: preview.summary
+  };
 }
 
 export async function createThemePackageBlob(input: CreateThemePackageInput): Promise<CreatedThemePackage> {
@@ -451,51 +726,23 @@ export async function inspectThemePackageFile(file: File): Promise<ThemePackageS
  * 主题包已装好、请桌面刷新（detail 带 installThemePackageFile 的返回值）。
  * 资源集市在 lib 里够不着外观页那两个 React 回调，改派这个事件，
  * 桌面 shell 走与外观页导入完全相同的落地路径。
+ * 2026-10-20 起集市改派 PREVIEW_REQUESTED 走"先预览再应用"；
+ * 本事件保留给仍想直接落地的调用方。
  */
 export const THEME_PACKAGE_INSTALLED_EVENT = "ai-phone-theme-package-installed";
 
+/** 请桌面进入美化包预览态（detail 带 previewThemePackageFile 的返回值），未确认前不落盘 */
+export const THEME_PACKAGE_PREVIEW_REQUESTED_EVENT = "ai-phone-theme-package-preview-requested";
+
 export async function installThemePackageFile(file: File): Promise<InstalledThemePackage> {
-  const { zip, manifest } = await loadZip(file);
-  const records: ThemeAssetRecord[] = [];
-
-  for (const asset of manifest.assets) {
-    const assetFile = zip.file(asset.path);
-    if (!assetFile) {
-      throw new Error(`主题包缺少资源：${asset.path}`);
-    }
-    const base64 = await assetFile.async("base64");
-    records.push({
-      id: asset.id,
-      type: asset.type,
-      mimeType: asset.mimeType,
-      dataUrl: `data:${asset.mimeType};base64,${base64}`,
-      updatedAt: asset.updatedAt
-    });
-  }
-
-  await writeThemeAssetRecords(records);
-  const themeProfile = writeThemeProfile(manifest.themeProfile);
-  saveDIYTemplates(manifest.desktop.diyTemplates);
-  saveWidgets(manifest.desktop.widgets);
-  // 主题包布局不含本机安装的自定义 app 图标，补回空位，避免导入后 app 从桌面消失
-  const packageDock = manifest.desktop.dock ?? loadDockLayout();
-  const packageFolderIds = manifest.desktop.folders ? new Set(Object.keys(manifest.desktop.folders)) : undefined;
-  // 补自定义 app 图标时，藏在包内文件夹里的成员也算"已在桌面"，别铺重复的
-  const folderMembers = Object.values(manifest.desktop.folders ?? {}).flatMap((f) => f.icons);
-  const iconLayout = writeDesktopIconLayout(
-    appendMissingCustomAppIcons(manifest.desktop.iconLayout, manifest.desktop.widgets, [...packageDock, ...folderMembers]),
-    packageFolderIds
-  );
-
-  return {
-    themeProfile,
-    iconLayout,
-    widgets: manifest.desktop.widgets,
-    diyTemplates: manifest.desktop.diyTemplates,
-    dock: manifest.desktop.dock,
-    folders: manifest.desktop.folders,
-    summary: makeSummary(manifest)
-  };
+  const preview = await previewThemePackageFile(file);
+  const installed = await commitThemePackagePreview(preview);
+  writeThemeProfile(installed.themeProfile);
+  saveWidgets(installed.widgets);
+  const packageFolderIds = installed.folders ? new Set(Object.keys(installed.folders)) : undefined;
+  const iconLayout = writeDesktopIconLayout(installed.iconLayout, packageFolderIds);
+  if (installed.dock) writeDockLayout(installed.dock);
+  return { ...installed, iconLayout };
 }
 
 export async function resetThemePackageState(): Promise<InstalledThemePackage> {

@@ -1,48 +1,58 @@
 "use client";
 
-import { Component, memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
+import dynamic from "next/dynamic";
+import { Component, memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
 
 import { updateStatusBarTone } from "@/lib/bg-tone";
 import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/diary-entry-timer-service";
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
 import { bgTimerCleanup } from "@/lib/bg-timer";
-import { PhoneThemeApp } from "@/components/phone-theme-app";
-import { PhoneCharacterApp } from "@/components/phone-character-app";
-import { PhoneSettingsApp } from "@/components/phone-settings-app";
-import { PhoneChatApp } from "@/components/chat/phone-chat-app";
+import { isMobilePhoneViewport } from "@/lib/pwa-display-mode";
 import { PhonePlaceholderApp } from "@/components/phone-placeholder-app";
-import MusicApp from "@/components/music/music-app";
 import MusicPlayer from "@/components/music/music-player";
 import MusicFloat from "@/components/music/music-float";
 import MiniAppWindow from "@/components/music/mini-app-window";
-import { PhoneCalendarApp } from "@/components/calendar-app";
-import { PhoneQaApp } from "@/components/phone-qa-app";
 import { ChatPluginPageBoundary } from "@/components/chat/chat-plugin-page-boundary";
-import { ResourceHubApp } from "@/components/resource-hub/resource-hub-app";
 import "@/lib/qa-error-log";
-import { RealityBridgeApp } from "@/components/reality-bridge-app";
 import { REALITY_BRIDGE_APP_EVENT_NAME, REALITY_BRIDGE_DATA_EVENT } from "@/lib/reality-bridge/types";
-import { DiaryApp } from "@/components/diary/diary-app";
-import { XiaohongshuApp } from "@/components/xiaohongshu/xiaohongshu-app";
-import { StoryApp } from "@/components/story/story-app";
-import { VnApp } from "@/components/vn/vn-app";
-import ReadingApp from "@/components/reading/reading-app";
-import MapApp from "@/components/map/map-app";
-import { DwellingApp } from "@/components/dwelling/dwelling-app";
 import { MascotFloat } from "@/components/mascot/mascot-float";
 import { MascotPreviewHost } from "@/components/mascot/mascot-preview-host";
 import { useMusicControlsOptional } from "@/lib/music-context";
-import { PhoneResourcesApp, type ResourceSubPage } from "@/components/phone-resources-app";
-import { CheckPhoneApp } from "@/components/checkphone/checkphone-app";
-import { ShoppingApp } from "@/components/shopping/shopping-app";
-import { GameHubApp } from "@/components/game/game-hub-app";
-import { MixologyApp } from "@/components/mixology/mixology-app";
-import InterviewMagazineApp from "@/components/interview/interview-magazine-app";
-import { CoCreateApp } from "@/components/cocreate/cocreate-app";
-import { AppMarketApp } from "@/components/app-market/app-market-app";
-import { CustomAppRunner } from "@/components/app-market/custom-app-runner";
+import type { ResourceSubPage } from "@/components/phone-resources-app";
 import { CustomAppForegroundBoundary } from "@/components/app-market/custom-app-failure";
+
+// 以下 25 个 App 一律按需加载。
+// 它们原本是静态 import，意味着打开首页就要把游戏中心、地图、阅读器、调酒、
+// three.js 等上万个模块一起下载并执行，首屏又慢又卡。改成 dynamic 后，
+// 每个 App 单独打成 chunk，只在被点开的那一刻才加载；主包只剩桌面本身
+// 和常驻悬浮控件（音乐浮窗、迷你窗、桌宠）。
+// ssr:false 是必要的——这些 App 依赖 IndexedDB/localStorage，服务端渲染无意义。
+const PhoneThemeApp = dynamic(() => import("@/components/phone-theme-app").then((m) => m.PhoneThemeApp), { ssr: false });
+const PhoneCharacterApp = dynamic(() => import("@/components/phone-character-app").then((m) => m.PhoneCharacterApp), { ssr: false });
+const PhoneSettingsApp = dynamic(() => import("@/components/phone-settings-app").then((m) => m.PhoneSettingsApp), { ssr: false });
+const PhoneChatApp = dynamic(() => import("@/components/chat/phone-chat-app").then((m) => m.PhoneChatApp), { ssr: false });
+const MusicApp = dynamic(() => import("@/components/music/music-app"), { ssr: false });
+const PhoneCalendarApp = dynamic(() => import("@/components/calendar-app").then((m) => m.PhoneCalendarApp), { ssr: false });
+const PhoneQaApp = dynamic(() => import("@/components/phone-qa-app").then((m) => m.PhoneQaApp), { ssr: false });
+const ResourceHubApp = dynamic(() => import("@/components/resource-hub/resource-hub-app").then((m) => m.ResourceHubApp), { ssr: false });
+const RealityBridgeApp = dynamic(() => import("@/components/reality-bridge-app").then((m) => m.RealityBridgeApp), { ssr: false });
+const DiaryApp = dynamic(() => import("@/components/diary/diary-app").then((m) => m.DiaryApp), { ssr: false });
+const XiaohongshuApp = dynamic(() => import("@/components/xiaohongshu/xiaohongshu-app").then((m) => m.XiaohongshuApp), { ssr: false });
+const StoryApp = dynamic(() => import("@/components/story/story-app").then((m) => m.StoryApp), { ssr: false });
+const VnApp = dynamic(() => import("@/components/vn/vn-app").then((m) => m.VnApp), { ssr: false });
+const ReadingApp = dynamic(() => import("@/components/reading/reading-app"), { ssr: false });
+const MapApp = dynamic(() => import("@/components/map/map-app"), { ssr: false });
+const DwellingApp = dynamic(() => import("@/components/dwelling/dwelling-app").then((m) => m.DwellingApp), { ssr: false });
+const PhoneResourcesApp = dynamic(() => import("@/components/phone-resources-app").then((m) => m.PhoneResourcesApp), { ssr: false });
+const CheckPhoneApp = dynamic(() => import("@/components/checkphone/checkphone-app").then((m) => m.CheckPhoneApp), { ssr: false });
+const ShoppingApp = dynamic(() => import("@/components/shopping/shopping-app").then((m) => m.ShoppingApp), { ssr: false });
+const GameHubApp = dynamic(() => import("@/components/game/game-hub-app").then((m) => m.GameHubApp), { ssr: false });
+const MixologyApp = dynamic(() => import("@/components/mixology/mixology-app").then((m) => m.MixologyApp), { ssr: false });
+const InterviewMagazineApp = dynamic(() => import("@/components/interview/interview-magazine-app"), { ssr: false });
+const CoCreateApp = dynamic(() => import("@/components/cocreate/cocreate-app").then((m) => m.CoCreateApp), { ssr: false });
+const AppMarketApp = dynamic(() => import("@/components/app-market/app-market-app").then((m) => m.AppMarketApp), { ssr: false });
+const CustomAppRunner = dynamic(() => import("@/components/app-market/custom-app-runner").then((m) => m.CustomAppRunner), { ssr: false });
 import { hydrateKvDb, kvGet, kvSet, kvRemove, kvKeysWithPrefix } from "@/lib/kv-db";
 import { deleteDatabase } from "@/lib/data-management/idb";
 import { hydrateStoryStorage } from "@/lib/story-storage";
@@ -95,7 +105,7 @@ import {
   readThemeProfile,
   writeThemeProfile
 } from "@/lib/theme-storage";
-import { THEME_PACKAGE_INSTALLED_EVENT } from "@/lib/theme-package";
+import { THEME_PACKAGE_INSTALLED_EVENT, THEME_PACKAGE_PREVIEW_REQUESTED_EVENT, commitThemePackagePreview, type ThemePackagePreview } from "@/lib/theme-package";
 import {
   DEFAULT_THEME_PROFILE,
   DEFAULT_FONT_FAMILY,
@@ -126,7 +136,15 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
+import { FloatingControlDock } from "@/components/floating-control-dock";
+import { QuickNoteFloat } from "@/components/quick-note-float";
+import {
+    CONTROL_DOCK_ACTIVATE_EVENT,
+    getControlDockState,
+    subscribeControlDockState,
+} from "@/lib/floating-controls-store";
 import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -635,6 +653,30 @@ function readInitialThemeProfile(): ThemeProfile {
   return readThemeProfile();
 }
 
+type IdleWindow = Window & {
+  requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+/**
+ * 把「不参与首屏绘制」的工作推到首帧之后的空闲时段执行。
+ * 有 requestIdleCallback 就用它（带超时兜底，最迟 timeout 后必然执行），
+ * 否则退回 setTimeout。返回取消函数。
+ *
+ * 开机瞬间主线程本来就在忙：KV 水合、首屏样式计算、桌面首帧布局。此时再
+ * 叠一批 IndexedDB 往返和大字符串展开，用户看到的就是「进桌面卡死几秒」。
+ */
+function scheduleIdle(callback: () => void, timeout = 1200): () => void {
+  if (typeof window === "undefined") return () => {};
+  const idleWindow = window as IdleWindow;
+  if (typeof idleWindow.requestIdleCallback === "function") {
+    const handle = idleWindow.requestIdleCallback(callback, { timeout });
+    return () => idleWindow.cancelIdleCallback?.(handle);
+  }
+  const handle = window.setTimeout(callback, 120);
+  return () => window.clearTimeout(handle);
+}
+
 /** Build a boolean grid marking cells occupied by widgets on one page */
 function buildWidgetOccupancy(pageWidgets: WidgetInstance[]): boolean[][] {
   const grid: boolean[][] = Array.from({ length: GRID_ROWS }, () =>
@@ -928,7 +970,6 @@ function useAndroidCaretKeyboardLift() {
       return;
     }
 
-    const mobileMq = window.matchMedia("(max-width: 500px) and (hover: none) and (pointer: coarse)");
     const viewport = window.visualViewport;
     let focusedElement: HTMLElement | null = null;
     let raf = 0;
@@ -948,7 +989,7 @@ function useAndroidCaretKeyboardLift() {
     const update = () => {
       raf = 0;
       const element = focusedElement;
-      if (!element || document.activeElement !== element || !mobileMq.matches || !viewport) {
+      if (!element || document.activeElement !== element || !isMobilePhoneViewport() || !viewport) {
         applyLift(0);
         return;
       }
@@ -1117,6 +1158,18 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   );
   const [savedTheme, setSavedTheme] = useState<ThemeProfile>(() => initialThemeProfile ?? readInitialThemeProfile());
   const [draftTheme, setDraftTheme] = useState<ThemeProfile>(() => initialThemeProfile ?? readInitialThemeProfile());
+  // ── 美化包预览：内存态覆盖桌面，确认「应用」前不写任何存储 ──
+  const [themePreview, setThemePreview] = useState<ThemePackagePreview | null>(null);
+  const [themePreviewBusy, setThemePreviewBusy] = useState(false);
+  const previewSnapshotRef = useRef<{
+    draftTheme: ThemeProfile;
+    savedTheme: ThemeProfile;
+    layout: DesktopLayout;
+    widgets: WidgetInstance[];
+    dock: DesktopIconId[];
+    folders: DesktopFolderMap;
+    themeAssets: Record<string, string>;
+  } | null>(null);
   useEffect(() => {
     activeAppRef.current = activeApp;
   }, [activeApp]);
@@ -1154,6 +1207,14 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   }, []);
 
   const [themeAssets, setThemeAssets] = useState<Record<string, string>>(() => initialThemeAssets ?? {});
+  // 已经取回（或已尝试取回）的资产 id 账本。
+  // 开机时 MainApp 已经把首屏要用的那批资产（壁纸/字体/dock 皮肤/激活图标皮肤）
+  // 读好并通过 initialThemeAssets 注入了；若这里不记账，桌面一挂载就会把同一批
+  // 资产连同整个壁纸库再全量读一遍——这就是「进入桌面第一下异常卡顿」的直接来源。
+  const loadedThemeAssetIdsRef = useRef<Set<string>>(new Set(Object.keys(initialThemeAssets ?? {})));
+  // 开机首轮的主题资产补读是否已结算：用来区分「首次开机」和「用户主动换肤」，
+  // 前者可以等到空闲期再读，后者必须立刻可见。
+  const themeAssetBootSettledRef = useRef(false);
   const [slotIconWidth, setSlotIconWidth] = useState<number | null>(null);
   const [slotIconHeight, setSlotIconHeight] = useState<number | null>(null);
   const [slotRowStep, setSlotRowStep] = useState<number | null>(null);
@@ -1578,8 +1639,18 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       handleThemeDesktopChangeRef.current?.({ widgets: detail.widgets, iconLayout: detail.iconLayout, dock: detail.dock, folders: detail.folders });
       void applyThemeRef.current?.(detail.themeProfile);
     };
+    // 预览请求：资源集市/外观页导入 zip 后先进内存预览，确认才落盘
+    const onThemePreview = (e: Event) => {
+      const preview = (e as CustomEvent).detail as ThemePackagePreview | undefined;
+      if (!preview?.themeProfile || !preview.desktop) return;
+      enterThemePreviewRef.current?.(preview);
+    };
     window.addEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
-    return () => window.removeEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
+    window.addEventListener(THEME_PACKAGE_PREVIEW_REQUESTED_EVENT, onThemePreview);
+    return () => {
+      window.removeEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
+      window.removeEventListener(THEME_PACKAGE_PREVIEW_REQUESTED_EVENT, onThemePreview);
+    };
   }, []);
 
   useEffect(() => {
@@ -1984,21 +2055,46 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   }, [desktopReady]);
 
   useEffect(() => {
-    const ids = collectThemeAssetIds(draftTheme);
-    if (ids.length === 0) {
+    // 只补读「这一轮还没取回过」的资产。首屏那批已由 MainApp 预加载、并作为
+    // initialThemeAssets 注入，这里直接跳过，省掉一次全量 IndexedDB 往返。
+    const pendingIds = collectThemeAssetIds(draftTheme).filter(
+      (id) => !loadedThemeAssetIdsRef.current.has(id)
+    );
+    const isBootSync = !themeAssetBootSettledRef.current;
+    if (pendingIds.length === 0) {
+      themeAssetBootSettledRef.current = true;
       return;
     }
 
     let disposed = false;
-    void getThemeAssetMap(ids).then((map) => {
-      if (disposed) {
-        return;
-      }
-      setThemeAssets((previous) => ({ ...previous, ...map }));
-    });
+    const load = () => {
+      void getThemeAssetMap(pendingIds).then((map) => {
+        if (disposed) return;
+        // 成功后才记账：StrictMode 的「挂载-卸载-再挂载」会走到这里两次，
+        // 提前记账会让这批资产永远读不到。
+        pendingIds.forEach((id) => loadedThemeAssetIdsRef.current.add(id));
+        if (Object.keys(map).length > 0) {
+          setThemeAssets((previous) => ({ ...previous, ...map }));
+        }
+      });
+    };
 
+    // 开机首轮补读推后到首帧空闲期（这批资产不参与首屏绘制）；之后的换肤补读
+    // 必须立刻生效，用户点了就要看见。
+    if (!isBootSync) {
+      load();
+      return () => {
+        disposed = true;
+      };
+    }
+
+    themeAssetBootSettledRef.current = true;
+    const cancelIdle = scheduleIdle(load);
     return () => {
       disposed = true;
+      cancelIdle();
+      // 被取消（含 StrictMode 的模拟卸载）时回滚标记，让下一次挂载仍走空闲补读。
+      themeAssetBootSettledRef.current = false;
     };
   }, [draftTheme, themeAssetKey]);
 
@@ -2447,6 +2543,29 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     window.addEventListener("open-mini-chat", handler);
     return () => window.removeEventListener("open-mini-chat", handler);
   }, []);
+
+  // 聊天小窗吃"可使用"这一维：可用 = 小窗能开（常驻与否只决定坞条上有没有按钮，
+  // 不常驻的从坞底「更多」进来）；停用 = 小窗彻底隐藏（已打开的也强制关掉）
+  const miniChatEnabled = useSyncExternalStore(
+    subscribeControlDockState,
+    () => getControlDockState().enabled["mini-chat"] !== false,
+    () => true,
+  );
+  useEffect(() => {
+    if (!miniChatEnabled) setShowMiniChat(false);
+  }, [miniChatEnabled]);
+
+  // 受统一控制坞驱动：坞里（或「更多」列表里）点「聊天小窗」时切换迷你聊天窗开合
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ control?: string }>).detail;
+      if (detail?.control !== "mini-chat") return;
+      if (!miniChatEnabled) return;
+      setShowMiniChat(prev => !prev);
+    };
+    window.addEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
+    return () => window.removeEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
+  }, [miniChatEnabled]);
 
   const openChatSessionFromNotice = useCallback((sessionId: string) => {
     if (chatMessageNoticeTimerRef.current !== null) {
@@ -3492,7 +3611,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     setCurrentPageIndex((index) => Math.min(index, Math.max(0, trimmedPageCount - 1)));
   }
 
-  function handleThemeDesktopChange(next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[]; folders?: DesktopFolderMap }): void {
+  type ThemeDesktopReplacement = { dock: DesktopIconId[]; folders: DesktopFolderMap; widgets: WidgetInstance[]; layout: DesktopLayout };
+
+  /** 纯计算：把一份外来桌面（导入/预览）与本机现状对账，产出替换方案。不做任何 setState/写盘。 */
+  function buildThemeDesktopReplacement(next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[]; folders?: DesktopFolderMap }): ThemeDesktopReplacement {
     const normalizedWidgets = sanitizeWidgetsForLayout(next.iconLayout, next.widgets);
     // 对账快照：用户此刻拥有的全部图标（页面 ∪ dock ∪ 文件夹成员）。
     // 导入/恢复默认是整桌替换，替换完谁没了着落就补回页面——
@@ -3525,20 +3647,124 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       if (!(id in ICONS) && !customIconIds.has(id)) continue;
       placeIconOnAvailablePage(sane.layout, normalizedWidgets, { id, row: 1, col: 1 }, 1);
     }
-    dockRef.current = nextDock;
-    setDock(nextDock);
-    writeDockLayout(nextDock);
-    setFolders(sane.folders);
-    writeDesktopFolders(sane.folders);
+    return { dock: nextDock, folders: sane.folders, widgets: normalizedWidgets, layout: sane.layout };
+  }
+
+  /** 立即落地版：算出替换方案，set 状态并写盘（外观页恢复默认等直改路径用）。 */
+  function handleThemeDesktopChange(next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[]; folders?: DesktopFolderMap }): void {
+    const replacement = buildThemeDesktopReplacement(next);
+    dockRef.current = replacement.dock;
+    setDock(replacement.dock);
+    writeDockLayout(replacement.dock);
+    foldersRef.current = replacement.folders;
+    setFolders(replacement.folders);
+    writeDesktopFolders(replacement.folders);
     setOpenFolderId(null);
-    setWidgets(normalizedWidgets);
-    setLayout(sane.layout);
-    saveWidgets(normalizedWidgets);
-    kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(sane.layout));
+    widgetsRef.current = replacement.widgets;
+    setWidgets(replacement.widgets);
+    layoutRef.current = replacement.layout;
+    setLayout(replacement.layout);
+    saveWidgets(replacement.widgets);
+    kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(replacement.layout));
+  }
+
+  const enterThemePreviewRef = useRef<((preview: ThemePackagePreview) => void) | null>(null);
+
+  /** 进入预览：快照现状 → 用包内容覆盖 React 状态，全程零写盘。重复预览保留第一份快照（还原回到最初）。 */
+  function enterThemePreview(preview: ThemePackagePreview): void {
+    if (!previewSnapshotRef.current) {
+      previewSnapshotRef.current = {
+        draftTheme,
+        savedTheme,
+        layout: layoutRef.current,
+        widgets: widgetsRef.current,
+        dock: dockRef.current,
+        folders: foldersRef.current,
+        themeAssets: { ...themeAssets },
+      };
+    }
+    if (preview.assets.length > 0) {
+      setThemeAssets((previous) => {
+        const map = { ...previous };
+        for (const asset of preview.assets) map[asset.id] = asset.dataUrl;
+        return map;
+      });
+    }
+    setDraftTheme(preview.themeProfile);
+    // css-pack 只换 CSS，桌面保持原样；标准包连布局一起覆盖
+    if (preview.kind === "package") {
+      const replacement = buildThemeDesktopReplacement({
+        widgets: preview.desktop.widgets,
+        iconLayout: preview.desktop.iconLayout,
+        dock: preview.desktop.dock,
+        folders: preview.desktop.folders,
+      });
+      dockRef.current = replacement.dock;
+      setDock(replacement.dock);
+      foldersRef.current = replacement.folders;
+      setFolders(replacement.folders);
+      widgetsRef.current = replacement.widgets;
+      setWidgets(replacement.widgets);
+      layoutRef.current = replacement.layout;
+      setLayout(replacement.layout);
+      setOpenFolderId(null);
+      const pageCount = getDesktopPageKeysForState(replacement.layout, replacement.widgets).length;
+      setCurrentPageIndex((index) => Math.min(index, Math.max(0, pageCount - 1)));
+    }
+    setThemePreview(preview);
+  }
+
+  /** 应用：把屏幕上前置的这套外观整体落盘（预览后用户若又微调，以当前显示为准）。 */
+  async function commitThemePreview(): Promise<void> {
+    if (!themePreview || themePreviewBusy) return;
+    setThemePreviewBusy(true);
+    try {
+      await commitThemePackagePreview(themePreview);
+      writeDockLayout(dockRef.current);
+      writeDesktopFolders(foldersRef.current);
+      saveWidgets(widgetsRef.current);
+      kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(layoutRef.current));
+      await applyTheme(draftTheme);
+      setNotice(`已应用美化包《${themePreview.name}》：${themePreview.summary.assetCount} 个资源，${themePreview.summary.widgetCount} 个桌面组件。`);
+      previewSnapshotRef.current = null;
+      setThemePreview(null);
+    } catch (error) {
+      console.error(error);
+      setNotice(error instanceof Error ? error.message : "美化包应用失败");
+    } finally {
+      setThemePreviewBusy(false);
+    }
+  }
+
+  /** 还原：回到预览开始前的状态；顺带把预览期间可能被编辑流程写盘的桌面拉回快照。 */
+  function cancelThemePreview(): void {
+    const snapshot = previewSnapshotRef.current;
+    if (snapshot) {
+      setDraftTheme(snapshot.draftTheme);
+      setSavedTheme(snapshot.savedTheme);
+      setThemeAssets(snapshot.themeAssets);
+      dockRef.current = snapshot.dock;
+      setDock(snapshot.dock);
+      foldersRef.current = snapshot.folders;
+      setFolders(snapshot.folders);
+      widgetsRef.current = snapshot.widgets;
+      setWidgets(snapshot.widgets);
+      layoutRef.current = snapshot.layout;
+      setLayout(snapshot.layout);
+      writeDockLayout(snapshot.dock);
+      writeDesktopFolders(snapshot.folders);
+      saveWidgets(snapshot.widgets);
+      kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(snapshot.layout));
+      setOpenFolderId(null);
+    }
+    previewSnapshotRef.current = null;
+    setThemePreview(null);
+    setNotice("已还原到预览前的外观");
   }
 
   handleThemeDesktopChangeRef.current = handleThemeDesktopChange;
   applyThemeRef.current = applyTheme;
+  enterThemePreviewRef.current = enterThemePreview;
 
   function handleWidgetConfigChange(widgetId: string, config: Record<string, unknown>): void {
     setWidgets((prev) => {
@@ -3746,6 +3972,97 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     draftTheme.wallpaperY,
     wallpaperDataUrl,
   ]);
+
+  // ── 「正在返回…」遮罩（退出 App 与应用内返回共用）──────────────────
+  // 真机 WebView 上退出可能要等上几秒（开发机只有几十毫秒，量级差在设备上），
+  // 没有反馈时用户无法区分「在加载」和「卡死了」。
+  // 关键：遮罩必须在 React 那次重提交之前就交给合成器，否则主线程被占住时它自己
+  // 也画不出来。所以在 pointerdown 的捕获阶段挂 class（React 的 onClick 要等到
+  // pointerup 之后才跑，中间至少隔一帧），再用 CSS transition-delay 让它 220ms
+  // 后才显形 —— 透明度动画跑在合成器线程，主线程卡住也照样淡入；快的设备一帧就
+  // 画完桌面，遮罩来不及出现，不会闪。
+  const exitVeilRef = useRef<HTMLDivElement | null>(null);
+  const exitPendingRef = useRef(false);
+
+  const finishExitVeil = useCallback(() => {
+    exitPendingRef.current = false;
+    exitVeilRef.current?.classList.remove("is-on");
+  }, []);
+
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const CLOSE_SEL = ".page-back-btn, [aria-label='返回'], [aria-label='关闭'], .custom-app-runner-capsule .cap-btn";
+    /** 这一次按下有没有真的走成一次 click（手指滑开就没有）——决定遮罩该不该收回 */
+    let closeClicked = false;
+    const onDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest?.(".phone-app-pane") || !target.closest?.(CLOSE_SEL)) return;
+      exitPendingRef.current = true;
+      closeClicked = false;
+      exitVeilRef.current?.classList.add("is-on");
+    };
+    /**
+     * 收回遮罩的判定必须等主线程空下来，不能按墙上时间算。
+     * 真机日志（2026-10-19 第二份）11 次退出里遮罩淡入全落在 393~519ms，
+     * 而退出那次 React 提交要 628~697ms：原来用 pointerup+500ms 的定时器判定
+     * "没走成返回"，每次都抢在提交之前把遮罩收回、顺手清掉 pending ——
+     * 于是「手指滑开」和「手机慢」这两种情况分不开：手机上转圈闪一下就没了、
+     * 屏幕还在卡（正是用户说的"不知道是卡住了还是什么"）。
+     * 改成双 rAF：主线程被提交占住时帧根本不会走，等这两帧跑到时 activeApp 已经是
+     * null 了 → 不在这里收回，交给下面 `activeApp` 为 null 那条路径；只有 App 还开着
+     * （应用内返回、或手指滑开）才在这里收回，而且此时离按下才十几毫秒，遮罩还没到
+     * 220ms 的显形延迟，应用内返回不会再闪一下。
+     */
+    const decideAfterCommit = () => {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (exitPendingRef.current && activeAppRef.current) finishExitVeil();
+      }));
+    };
+    const onClick = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest?.(".phone-app-pane") || !target.closest?.(CLOSE_SEL)) return;
+      closeClicked = true;
+      decideAfterCommit();
+      // 墙上时钟兜底：页面在后台时 rAF 根本不触发（实测踩过），双 rAF 的判定永远不会跑，
+      // 应用内返回的遮罩会一直留到 10s 保险。1200ms 远大于真机实测最慢的那次退出提交
+      // （628~697ms），前台慢机器上这会儿 activeApp 已经是 null 了，不会误收。
+      window.setTimeout(() => { if (activeAppRef.current) finishExitVeil(); }, 1200);
+    };
+    const onUp = () => {
+      // 没走成 click（按下后手指滑开）→ 短延时收掉，别让遮罩留在屏幕上
+      window.setTimeout(() => { if (!closeClicked && activeAppRef.current) finishExitVeil(); }, 400);
+    };
+    shell.addEventListener("pointerdown", onDown, true);
+    shell.addEventListener("pointerup", onUp, true);
+    shell.addEventListener("pointercancel", onUp, true);
+    shell.addEventListener("click", onClick, true);
+    return () => {
+      shell.removeEventListener("pointerdown", onDown, true);
+      shell.removeEventListener("pointerup", onUp, true);
+      shell.removeEventListener("pointercancel", onUp, true);
+      shell.removeEventListener("click", onClick, true);
+    };
+  }, [finishExitVeil]);
+
+  useEffect(() => {
+    if (activeApp) {
+      // 又进了别的 App：直接收掉遮罩，别把它留在桌面上
+      finishExitVeil();
+      return;
+    }
+    if (!exitPendingRef.current) return;
+    // 两帧之后再收：第一帧是 React 提交后的首次绘制，第二帧才说明桌面真的画出来了。
+    // 同时挂一个定时器兜底 —— 页面切到后台时 rAF 根本不触发，只等 rAF 会把遮罩
+    // 永久留在屏幕上（实测踩过）。finishExitVeil 幂等，谁先到谁生效。
+    requestAnimationFrame(() => requestAnimationFrame(() => finishExitVeil()));
+    const fallback = window.setTimeout(() => finishExitVeil(), 400);
+    const safety = window.setTimeout(() => finishExitVeil(), 10_000);
+    return () => {
+      window.clearTimeout(fallback);
+      window.clearTimeout(safety);
+    };
+  }, [activeApp, finishExitVeil]);
 
   const handleSwipeMove = useCallback((e: React.PointerEvent) => {
     // ── Long-press cancellation ──
@@ -4005,6 +4322,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
           widgets={widgets}
           onWidgetsChange={handleWidgetsChange}
           onDesktopThemeChange={handleThemeDesktopChange}
+          onThemePreviewRequest={(preview) => { enterThemePreview(preview); setActiveApp(null); }}
+          themePreviewActive={themePreview !== null}
           pageIcons={layout}
           iconSkins={iconSkinUrls}
           wallpaperStyle={wallpaperStyle}
@@ -4451,7 +4770,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
               {/* Mini chat window — persists across music pages */}
               <MiniAppWindow
                 title="聊天"
-                visible={showMiniChat}
+                visible={showMiniChat && miniChatEnabled}
                 onClose={handleMiniChatClose}
                 onExpand={handleMiniChatExpand}
               >
@@ -4497,8 +4816,20 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
 
 
-                {!activeApp ? (
-                  <>
+                {/*
+                  桌面常驻挂载（原为 !activeApp 条件渲染）。
+                  实测（2026-10-19，真实数据：27 图标 + 组件 + 4 Dock，主题库 62.6MB）：
+                  退出 App 时桌面整棵树卸载重建会产生两条背靠背长任务
+                  —— 291~308ms 的 React 重挂 + 245~289ms 的首帧栅格化，合计 540~600ms，
+                  且与「是哪个 App」无关（聊天 / 独家特调 数字一致）。
+                  改为常驻后由 .phone-desktop-layer 的 CSS 负责隐藏，React 重挂这条整条消失。
+                  详见 docs/改动记录.md「2026-10-19 · 退出 App 卡顿」。
+                */}
+                <div
+                  className="phone-desktop-layer"
+                  inert={activeApp ? true : undefined}
+                  aria-hidden={activeApp ? true : undefined}
+                >
                     <div
                       ref={swipeLayerRef}
                       className="phone-swipe-layer"
@@ -4703,8 +5034,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                         />
                       ))}
                     </div>
-                  </>
-                ) : (
+                </div>
+                {activeApp ? (
                   <>
                     <section className="phone-app-pane" style={activeApp === "dwelling" || activeApp === "xiaohongshu" || activeApp === "shopping" ? { display: "none" } : undefined}>
                       {renderAppBody()}
@@ -4720,7 +5051,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       </section>
                     )}
                   </>
-                )}
+                ) : null}
                 {xiaohongshuMounted && (
                   <section className="phone-app-pane" style={activeApp !== "xiaohongshu" ? { display: "none" } : undefined}>
                     <XiaohongshuApp
@@ -4754,10 +5085,12 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
               </div>
 
-              {!activeApp ? (
-                <footer
+              {/* Dock 同样常驻挂载，App 打开时由 CSS 隐藏，见上方 .phone-desktop-layer 说明 */}
+              <footer
                   ref={dockElRef}
                   className={editMode ? "dock edit-mode" : "dock"}
+                  inert={activeApp ? true : undefined}
+                  aria-hidden={activeApp ? true : undefined}
                   {...(dockSkinUrl ? { "data-skinned": "" } : {})}
                   style={{ "--dock-count": Math.max(1, dock.length) } as CSSProperties}
                   onPointerMove={handleSwipeMove}
@@ -4822,10 +5155,21 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       </button>
                     );
                   })}
-                </footer>
-              ) : null}
+              </footer>
+              {/* 退出 App 时的等待遮罩：只有卡到 220ms 以上才会淡入（见上方逻辑注释）。
+                  文案用中性的「正在返回…」而不是「正在返回桌面…」：CLOSE_SEL 匹配的是
+                  .page-back-btn / [aria-label=返回|关闭]，这些在选择器里分不清"退回桌面"和
+                  "应用内返回"。第三份真机日志（2026-10-19 07-15-54）15 次命中里只有 1 次真的
+                  退到了桌面，其余 14 次是特调里"对局→大厅"这类应用内返回，其中 2 次遮罩确实
+                  显形了（637ms、700ms）—— 那时告诉用户"正在返回桌面"是假话。 */}
+              <div ref={exitVeilRef} className="app-exit-veil" aria-hidden="true">
+                <span className="app-exit-veil-spin" />
+                <span>正在返回…</span>
+              </div>
               <DebugPromptPanel />
               <QuickActionFloat />
+              <FloatingControlDock activeApp={activeApp} />
+              <QuickNoteFloat />
               <MascotFloat />
               {/* 预览弹窗宿主：独立于桌宠的展开/收起状态，否则桌宠收成小球时弹不出来 */}
               <MascotPreviewHost />
@@ -4929,6 +5273,40 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     );
                   })}
                   </div>
+                </div>
+              )}
+              {/* 美化包预览确认条：只在桌面可见（打开 App 时预览状态原样保留，回到桌面继续确认） */}
+              {!activeApp && themePreview && (
+                <div
+                  className="absolute bottom-0 left-0 right-0 z-[9998] bg-white/92 backdrop-blur-xl border-t border-gray-200/60 shadow-[0_-8px_28px_rgba(0,0,0,0.12)] rounded-t-[22px] px-4 py-3 flex items-center gap-3 text-black"
+                  onPointerDown={e => e.stopPropagation()}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[calc(13px*var(--app-text-scale,1))] font-medium truncate">
+                      正在预览《{themePreview.name}》
+                    </div>
+                    <div className="text-[calc(11px*var(--app-text-scale,1))] text-gray-500 truncate">
+                      {themePreview.kind === "css-pack"
+                        ? `纯 CSS 美化包 · 已合并 ${(themePreview.mergedCssBytes / 1024).toFixed(0)}KB 样式`
+                        : `${themePreview.summary.assetCount} 个资源 · ${themePreview.summary.widgetCount} 个组件 · ${themePreview.summary.iconCount} 个图标${themePreview.mergedCssBytes > 0 ? ` · 含 ${(themePreview.mergedCssBytes / 1024).toFixed(0)}KB CSS` : ""}`}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="shrink-0 px-4 py-2 rounded-full bg-gray-800 text-white text-[calc(13px*var(--app-text-scale,1))] font-medium active:scale-95 disabled:opacity-40"
+                    onClick={() => { void commitThemePreview(); }}
+                    disabled={themePreviewBusy}
+                  >
+                    应用
+                  </button>
+                  <button
+                    type="button"
+                    className="shrink-0 px-4 py-2 rounded-full bg-gray-100 text-gray-700 text-[calc(13px*var(--app-text-scale,1))] font-medium active:scale-95 disabled:opacity-40"
+                    onClick={cancelThemePreview}
+                    disabled={themePreviewBusy}
+                  >
+                    还原
+                  </button>
                 </div>
               )}
               {showDesktopCustomizer && (

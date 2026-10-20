@@ -6,6 +6,10 @@
 # conventional config-file change and performs a fresh production build.
 # story-tail-editor-modal: 2026-09-11
 
+[build.environment]
+  NODE_VERSION = "22"
+  NEXT_PUBLIC_SELF_HOSTED_MODE = "true"
+
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 

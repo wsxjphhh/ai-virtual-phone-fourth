@@ -1,7 +1,8 @@
-"use client";
+﻿"use client";
 
 import { forwardRef, Fragment, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatCharacterAvatar, resolveChatUserAvatar } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, DEFAULT_SESSION_CONTEXT_TOKEN_BUDGET, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatCharacterAvatar, resolveChatUserAvatar } from "@/lib/chat-storage";
+
 import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXmlTagBlocks } from "@/lib/stream-preview";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
@@ -9,12 +10,20 @@ import { parseAIResponse, type ParsedMessagePart } from "@/lib/rich-message-pars
 import { isKnownStickerLabel } from "@/lib/sticker-data";
 import { translateReasoningText } from "@/lib/reasoning-translate";
 import { MessageBubble, MediaDetailModal, prewarmStickerCache, BilingualTextBlock, isStandaloneHtmlPreviewContent, normalizeTextBubbleContent } from "./message-bubble";
+import { ConversationManager } from "./conversation-manager";
+import { estimateSessionTokens } from "@/lib/chat-conversation-utils";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
 import { PhotoInputModal, TextPhotoModal, VoiceRecordModal, RedPacketModal, LocationInputModal, SystemInstructionModal } from "./rich-input-modals";
 import { EmojiPanel, StickerPanel } from "./emoji-panel";
+import { ChatDocAttachmentTray, ChatDocImportSheet } from "./chat-doc-import";
+import {
+    attachmentCardLabel,
+    resolveAttachmentText,
+    type ChatDocAttachment,
+} from "@/lib/chat-document-import";
 import { StickerSearchSuggest } from "./sticker-search-suggest";
 import { StateValuesPanel } from "./state-values-panel";
-import { generateChatCompletion, generateOfflineChatCompletion, flattenCompletionResult, ChatEngineError } from "@/lib/chat-engine";
+import { generateChatCompletion, generateOfflineChatCompletion, flattenCompletionResult, ChatEngineError, shouldChatInstantReveal } from "@/lib/chat-engine";
 import { formatOfflineTurnXml as formatOfflineTurnXmlShared, buildOfflinePromptHistory as buildOfflinePromptHistoryShared } from "@/lib/offline-prompt-builder";
 import { getStatusRegionConfig, isCustomStatusRegionActive, STATUS_REGION_UPDATED_EVENT } from "@/lib/chat-status-region";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
@@ -43,8 +52,9 @@ import { TransferTargetModal } from "./transfer-target-modal";
 import { GiftPickerModal } from "./gift-picker-modal";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { deleteWeixinCloudMessagesFromCloud, emitWeixinSyncToast, syncAllWeixinBotRuntimesToCloud } from "@/lib/weixin-cloud-sync";
-import { loadBindingConfig, loadPresets, loadRegexes, resolveBinding, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
+import { loadApiConfigs, loadBindingConfig, loadPresets, loadRegexes, resolveBinding, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
 import { resolveChatAccountUserIdentity } from "@/lib/chat-scope-storage";
+
 import { generateGroupChatCompletion, generateGroupOfflineChatCompletion, parseGroupChatResponse, buildEditableGroupRoundText } from "@/lib/group-chat-engine";
 import { appendChatOfflineTurn, clearChatOfflineTurns, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, extractThinkingTag, loadChatOfflineTurns, parseOfflineResponse, preserveChatOfflineSummaries, saveChatOfflineTurns, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
 import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
@@ -53,7 +63,7 @@ import { useKeyboardDismissAutoSend } from "@/components/chat/use-keyboard-dismi
 import { cancelBailoutKey } from "@/lib/push-bailout-client";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import type { UserIdentity } from "@/components/settings/user-identity";
-import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
+import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, FileText, Gift, Languages, Loader2, MoreHorizontal, X, MessageSquare } from "lucide-react";
 import { setDebugChatState } from "@/lib/debug-store";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { setChatActive } from "@/lib/music-action-queue";
@@ -473,6 +483,9 @@ type ChatRoomProps = {
     onDeleted?: () => void;
     /** Embedded callers can observe user-sent rich messages without duplicating chat logic. */
     onUserMessageSent?: (message: ChatMessage) => void;
+    /** 多会话：请求切换到另一个会话（父层负责挂载并设为 active）；传空串表示回到会话列表 */
+    onSwitchSession?: (sessionId: string) => void;
+
 };
 
 type OfflineActionTarget = {
@@ -643,6 +656,13 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     onStopGeneration: () => void;
     onTriggerAIResponse: () => void;
 	onSendSticker: (name: string, url?: string) => void;
+    /** 待发的文件卡（导入的长文档） */
+    docAttachments: ChatDocAttachment[];
+    onRemoveDocAttachment: (docId: string) => void;
+    onInsertDocAttachment: (attachment: ChatDocAttachment) => void;
+    onOpenDocImport: () => void;
+    /** 把待发文件卡落成消息；返回 false = 被拒（如禁言中） */
+    onSendDocAttachments: () => boolean;
 }>(function ChatTextInputBar({
     characterName,
     characterId,
@@ -675,6 +695,11 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     onStopGeneration,
     onTriggerAIResponse,
     onSendSticker,
+    docAttachments,
+    onRemoveDocAttachment,
+    onInsertDocAttachment,
+    onOpenDocImport,
+    onSendDocAttachments,
 }, ref) {
     const [inputText, setInputText] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -720,8 +745,14 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
             return;
         }
         const trimmed = inputText.trim();
-        if (!trimmed) return;
-        if (!onSendText(trimmed)) return;
+        const hasDocs = docAttachments.length > 0;
+        // 只有附件、没有文字也算一次有效发送（把材料丢给角色读）
+        if (!trimmed && !hasDocs) return;
+        if (hasDocs && !onSendDocAttachments()) return;
+        if (trimmed && !onSendText(trimmed, { autoReply: false })) return;
+        // 有附件时顺手要一次回复（材料刚进上下文，角色该有反应）；
+        // 纯文字保持原样——发送本身不自动触发回复，由「主动回复」按钮决定
+        if (hasDocs) onTriggerAIResponse();
         setInputText("");
         resetTextareaHeight();
         onClosePanels();
@@ -745,6 +776,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
         { icon: <Gift size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "礼物", onClick: () => onOpenRichModal("gift") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>, label: "位置", onClick: () => onOpenRichModal("location") },
         { icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--c-text)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>, label: "语音条", onClick: () => onOpenRichModal("voice_msg") },
+        { icon: <FileText size={22} strokeWidth={1.5} color="var(--c-text)" />, label: "导入文件", onClick: onOpenDocImport },
         ...customPlusActions.map(action => ({
             icon: action.appIconDataUrl
                 ? <span className="chat-plus-custom-app-icon" style={{ backgroundImage: `url(${action.appIconDataUrl})` }} aria-hidden="true" />
@@ -781,6 +813,14 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                     <button onClick={onClearQuote} className="ui-bare-btn text-[var(--c-icon)] ts-16 leading-none p-[2px]">✕</button>
                 </div>
             )}
+
+            <ChatDocAttachmentTray
+                attachments={docAttachments}
+                onRemove={onRemoveDocAttachment}
+                onInsert={onInsertDocAttachment}
+                onOpenImport={onOpenDocImport}
+                disabled={inputLocked}
+            />
 
             {suggestEnabled && (
                 <StickerSearchSuggest
@@ -854,8 +894,18 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="16" /><line x1="8" y1="12" x2="16" y2="12" /></svg>
                 </button>
                 <button
+                    onClick={onOpenDocImport}
+                    disabled={inputLocked}
+                    className="ui-bare-btn text-[var(--c-text)]"
+                    style={inputLocked ? { opacity: 0.35 } : undefined}
+                    aria-label="导入文件"
+                    title="导入文件（docx / doc / txt / md / pdf）到对话"
+                >
+                    <FileText size={22} strokeWidth={1.5} />
+                </button>
+                <button
                     onClick={handleSubmit}
-                    disabled={!isGenerating && (inputLocked || !inputText.trim())}
+                    disabled={!isGenerating && (inputLocked || (!inputText.trim() && docAttachments.length === 0))}
                     style={inputLocked && !isGenerating ? { opacity: 0.35 } : undefined}
                     className="ui-bare-btn text-[var(--c-text)]"
                     aria-label={isGenerating ? "停止本轮生成" : "发送"}
@@ -1093,10 +1143,19 @@ const OfflineTextInputBar = memo(forwardRef<OfflineTextInputHandle, {
     );
 }));
 
-export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: ChatRoomProps) {
+export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, onSwitchSession }: ChatRoomProps) {
+
     const [liveCSS, setLiveCSS] = useState(session.customCSS || "");
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [transientMessages, setTransientMessages] = useState<ChatMessage[]>([]);
+    // 多会话管理面板开关
+    const [showManager, setShowManager] = useState(false);
+    // 当前会话上下文用量（用于头部提示「该开新窗口了」）
+    const contextUsage = useMemo(() => {
+        const budget = session.contextTokenBudget || DEFAULT_SESSION_CONTEXT_TOKEN_BUDGET;
+        const tokens = estimateSessionTokens(messages);
+        return { budget, tokens, pct: Math.min(100, Math.round((tokens / budget) * 100)) };
+    }, [messages, session.contextTokenBudget]);
     const [stickerReady, setStickerReady] = useState(false);
     const [character, setCharacter] = useState<Character | null>(() => {
         const chars = loadCharacters();
@@ -1163,6 +1222,9 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     const [showStickerPanel, setShowStickerPanel] = useState(false);
     const chatTextInputRef = useRef<ChatTextInputHandle | null>(null);
     const offlineTextInputRef = useRef<OfflineTextInputHandle | null>(null);
+    // 文件导入：待发的长文档卡片（发送时正文进上下文，气泡只显示一张卡）
+    const [docAttachments, setDocAttachments] = useState<ChatDocAttachment[]>([]);
+    const [docImportOpen, setDocImportOpen] = useState(false);
 
     useEffect(() => {
         const syncEnterToSend = () => {
@@ -1655,6 +1717,25 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
             stripTexts: (preset?.strip_texts || []).filter(Boolean),
         };
     }, [regexRevision, session.contactId, session.isGroup]);
+
+    // 是否立即放出消息（跳过模拟打字动画）：全局关流式或会话开流式时都立即放出
+    const instantRevealOnline = useMemo(() => {
+        const bindings = loadBindingConfig();
+        const slot = resolveBinding(bindings, session.isGroup ? undefined : session.contactId, session.isGroup ? "group_chat" : "chat");
+        const apiConfigs = loadApiConfigs();
+        const config = apiConfigs.find(c => c.id === slot.apiConfigId);
+        if (!config) return isSessionStreamingEnabled(session, true);
+        return shouldChatInstantReveal(config, session, true);
+    }, [session.contactId, session.isGroup, session.streamOnline]);
+
+    const instantRevealOffline = useMemo(() => {
+        const bindings = loadBindingConfig();
+        const slot = resolveBinding(bindings, session.isGroup ? undefined : session.contactId, session.isGroup ? "group_chat" : "chat");
+        const apiConfigs = loadApiConfigs();
+        const config = apiConfigs.find(c => c.id === slot.apiConfigId);
+        if (!config) return isSessionStreamingEnabled(session, false);
+        return shouldChatInstantReveal(config, session, false);
+    }, [session.contactId, session.isGroup, session.streamOffline]);
 
     const displayRegexMacroEngine = useMemo(() => {
         const charName = session.isGroup
@@ -3379,7 +3460,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     },
                 );
                 if (!isCurrentGeneration()) return;
-                await processGroupParts(results, setMessages, generationGuard, roundReasoning, { instantReveal: isSessionStreamingEnabled(session, true) });
+                await processGroupParts(results, setMessages, generationGuard, roundReasoning, { instantReveal: instantRevealOnline });
             } else {
                 let capturedReasoning: string | undefined;
                 const cr = await generateChatCompletion(
@@ -3413,7 +3494,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     },
                 );
                 if (!isCurrentGeneration()) return;
-                const result = await splitAndSaveAIMessages(flattenCompletionResult(cr), { ...generationGuard, reasoningText: capturedReasoning, instantReveal: isSessionStreamingEnabled(session, true) });
+                const result = await splitAndSaveAIMessages(flattenCompletionResult(cr), { ...generationGuard, reasoningText: capturedReasoning, instantReveal: instantRevealOnline });
                 if (!isCurrentGeneration()) return;
                 scheduleFollowUp(session.id, 0, result.stateValues);
                 handleCallTrigger(result.triggerCall);
@@ -3815,7 +3896,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         const visibleResults = parseGroupChatResponse(content, nameToId)
                             .filter(item => item.responseText.trim());
                         if (visibleResults.length > 0) {
-                            await processGroupParts(visibleResults, setMessages, generationGuard, reasoning, { instantReveal: isSessionStreamingEnabled(session, true) });
+                            await processGroupParts(visibleResults, setMessages, generationGuard, reasoning, { instantReveal: instantRevealOnline });
                         }
 
                         throwIfGenerationStopped(generationGuard);
@@ -3857,7 +3938,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     await Promise.allSettled(streamedImageReplacementTasks);
                     throwIfGenerationStopped(generationGuard);
                 }
-                await processGroupParts(results, setMessages, generationGuard, pendingGroupReasoning, { instantReveal: isSessionStreamingEnabled(session, true) });
+                await processGroupParts(results, setMessages, generationGuard, pendingGroupReasoning, { instantReveal: instantRevealOnline });
             } else {
                 let lastSendResult: Awaited<ReturnType<typeof splitAndSaveAIMessages>> | undefined;
                 // 每轮 LLM 调用的思维链，onReasoning 先于该轮 onTextPart 触发
@@ -3892,7 +3973,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         if (text.trim()) {
                             const reasoningText = pendingReasoning;
                             pendingReasoning = undefined;
-                            lastSendResult = await splitAndSaveAIMessages(text, { ...options, ...generationGuard, reasoningText, instantReveal: isSessionStreamingEnabled(session, true) });
+                            lastSendResult = await splitAndSaveAIMessages(text, { ...options, ...generationGuard, reasoningText, instantReveal: instantRevealOnline });
                         }
                     },
                     onToolNotice: (notice) => {
@@ -3916,7 +3997,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         // bubbles. The native tool-call metadata then rides on a separate
                         // empty carrier message — mirroring the group-chat path above.
                         if (content.trim()) {
-                            await splitAndSaveAIMessages(content, { ...generationGuard, reasoningText: reasoning, instantReveal: isSessionStreamingEnabled(session, true) });
+                            await splitAndSaveAIMessages(content, { ...generationGuard, reasoningText: reasoning, instantReveal: instantRevealOnline });
                         }
                         if (!isCurrentGeneration()) return;
                         const carrier = pushChatMessage({
@@ -4195,6 +4276,51 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         } catch (error) {
             showChatToast(error instanceof Error ? error.message : "创建见面剧情失败，请稍后再试");
         }
+    };
+
+    // ── 文件导入 ──────────────────────────────────────────
+    // 把待发文件卡落成消息：正文（含分类/标签/备注头 + 所选章节）写进 media_file 消息的
+    // content —— llm-prompt-assembler 对 media_file 取 msg.content，所以角色拿得到全文；
+    // 气泡只渲染一张文件卡，不在聊天里刷一整面墙。
+    const sendDocAttachments = (): boolean => {
+        if (!ensureGroupSpeakPermission()) return false;
+        if (!docAttachments.length) return false;
+        cancelFollowUp(session.id);
+        const committed: ChatMessage[] = [];
+        for (const attachment of docAttachments) {
+            const text = resolveAttachmentText(attachment);
+            if (!text.trim()) continue;
+            committed.push(pushChatMessage({
+                sessionId: session.id,
+                role: "user",
+                content: text,
+                mediaType: "media_file",
+                mediaData: {
+                    fileType: "file",
+                    fileName: attachmentCardLabel(attachment),
+                    label: attachment.title,
+                },
+            }));
+        }
+        if (!committed.length) {
+            setDocAttachments([]);
+            return false;
+        }
+        committed.forEach(message => onUserMessageSent?.(message));
+        committed.forEach(message => onUserMessageSent?.(message));
+        setMessages(prev => [...prev, ...committed]);
+        setDocAttachments([]);
+        setPendingGenerate(true);
+        return true;
+    };
+
+    const insertDocAttachmentText = (attachment: ChatDocAttachment) => {
+        chatTextInputRef.current?.appendText(resolveAttachmentText(attachment));
+    };
+
+    const removeDocAttachment = (docId: string) => {
+        setDocAttachments(prev => prev.filter(item => item.docId !== docId));
+
     };
 
     // 线下 XML 构造与提示词查看器共用 lib/offline-prompt-builder（社区 #108），
@@ -5716,6 +5842,48 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         )}
                     </span>
                     <span className="page-header-right">
+                        <button
+                            type="button"
+                            onClick={() => setShowManager(true)}
+                            title={`当前会话上下文 ${contextUsage.tokens}/${contextUsage.budget} token（${contextUsage.pct}%）\n点此打开对话管理、新建或压缩总结`}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 5,
+                                border: "1px solid var(--c-border, rgba(0,0,0,0.12))",
+                                background: "var(--c-panel, rgba(0,0,0,0.04))",
+                                borderRadius: 999,
+                                padding: "3px 9px",
+                                cursor: "pointer",
+                                color: contextUsage.pct >= 80 ? "#e5484d" : "var(--c-text, #111)",
+                                fontSize: 11,
+                                fontWeight: 600,
+                                whiteSpace: "nowrap",
+                                marginRight: 6,
+                            }}
+                        >
+                            <span
+                                style={{
+                                    width: 7,
+                                    height: 7,
+                                    borderRadius: "50%",
+                                    background: contextUsage.pct >= 80 ? "#e5484d" : contextUsage.pct >= 60 ? "#f5a524" : "#3b82f6",
+                                    display: "inline-block",
+                                }}
+                            />
+                            上下文 {contextUsage.pct}%
+                        </button>
+                        <button
+                            className="page-back-btn"
+                            type="button"
+                            onClick={() => setShowManager(true)}
+                            aria-label="对话管理"
+                            title="对话管理：切换 / 新建 / 压缩总结"
+                            style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, lineHeight: 1 }}
+                        >
+                            <MessageSquare size={20} strokeWidth={1.6} />
+                            <span style={{ fontSize: 9, fontWeight: 600 }}>会话</span>
+                        </button>
                         <button className="page-back-btn" type="button" onClick={() => setShowSettings(true)} aria-label="更多">
                             <MoreHorizontal size={22} strokeWidth={1.5} />
                         </button>
@@ -5727,6 +5895,22 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 slotProps={{ sessionId: session.id, isGroup: !!session.isGroup }}
                 className="chat-plugin-header chat-room-main-pane"
             />
+
+            {showManager && (
+                <ConversationManager
+                    currentSession={session}
+                    onClose={() => setShowManager(false)}
+                    onSelectSession={(id) => {
+                        if (!id) {
+                            setShowManager(false);
+                            onBack();
+                        } else if (onSwitchSession) {
+                            setShowManager(false);
+                            onSwitchSession(id);
+                        }
+                    }}
+                />
+            )}
 
             {/* Message List */}
             <div
@@ -6591,8 +6775,25 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 onStopGeneration={clearStuckGeneration}
                 onTriggerAIResponse={triggerAIResponse}
                 onSendSticker={(name, url) => { setShowStickerPanel(false); sendRichMessage("sticker", { label: name, stickerUrl: url }); }}
+                docAttachments={docAttachments}
+                onRemoveDocAttachment={removeDocAttachment}
+                onInsertDocAttachment={insertDocAttachmentText}
+                onOpenDocImport={() => { setShowEmojiPanel(false); setShowStickerPanel(false); setShowPlusMenu(false); setDocImportOpen(true); }}
+                onSendDocAttachments={sendDocAttachments}
             />
             ))}
+
+            <ChatDocImportSheet
+                open={docImportOpen}
+                onClose={() => setDocImportOpen(false)}
+                onInsertText={(text) => chatTextInputRef.current?.appendText(text)}
+                onAttach={(attachment) => setDocAttachments(prev => (
+                    prev.some(item => item.docId === attachment.docId)
+                        ? prev.map(item => (item.docId === attachment.docId ? attachment : item))
+                        : [...prev, attachment]
+                ))}
+                onNotice={(message) => showChatToast(message)}
+            />
 
             {showConfirmMultiDelete && (
                 <ConfirmDialog

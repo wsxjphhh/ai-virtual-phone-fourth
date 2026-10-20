@@ -28,6 +28,7 @@ import { extractTextToolDirectiveText, stripTextToolDirectives } from "./text-to
 import { applyWithProtectedAvatarDecisionMarkers, findUserAvatarChangeIntent } from "./chat-avatar-intent";
 import type { ApiConfig, PresetConfig, Prompt, PromptOrderEntry, RegexConfig } from "./settings-types";
 import type { CustomAppPromptProfile } from "./custom-app-types";
+import { recordLlmSpend, type LlmUsageLike } from "./api-accounts";
 import {
     resolveBinding,
     loadBindingConfig,
@@ -48,6 +49,7 @@ import {
     nativeToolProtocolForConfig,
     parseProviderResponse,
     parseProviderStreamDelta,
+    providerKindForConfig,
     stripHallucinatedTimestamps,
     toLlmRequestMessages,
     type LlmProviderKind,
@@ -102,6 +104,36 @@ export class ChatEngineError extends Error {
         super(message);
         this.name = "ChatEngineError";
     }
+}
+
+/**
+ * 判断当前是否应该使用流式调用。
+ * 同时考虑「会话级流式开关」和「API 配置级流式总闸」：
+ * - API 配置关闭流式时（enableStreaming === false），一律走非流式
+ * - API 配置开启或未设置时（默认开），按会话的 streamOnline / streamOffline 决定
+ */
+export function isStreamingEnabled(
+    config: Pick<ApiConfig, "enableStreaming">,
+    session: Parameters<typeof isSessionStreamingEnabled>[0],
+    online: boolean,
+): boolean {
+    if (config.enableStreaming === false) return false;
+    return isSessionStreamingEnabled(session, online);
+}
+
+/**
+ * 判断聊天消息落库后是否应该「立即放出」（跳过 800ms 模拟打字动画）。
+ * 两种情况立即放出：
+ * 1. API 配置全局关闭流式时 —— 用户期望「非流式 = 整段出现」，与特调行为一致
+ * 2. 会话级流式开启时 —— 用户已经看着内容边生成边显示了，落库后再播一遍打字动画像「重播」
+ */
+export function shouldChatInstantReveal(
+    config: Pick<ApiConfig, "enableStreaming">,
+    session: Parameters<typeof isSessionStreamingEnabled>[0],
+    online: boolean,
+): boolean {
+    if (config.enableStreaming === false) return true;
+    return isSessionStreamingEnabled(session, online);
 }
 
 const LLM_IMAGE_MAX_SIDE = 512;
@@ -655,10 +687,15 @@ export function previewMessagesForApi(
     }));
 }
 
+/** 流式响应里可能出现的 usage 结构（OpenAI 兼容流在开启 include_usage 时于末尾 chunk 下发） */
+export type LlmStreamUsage = { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+
 export type ChatCompletionStreamResult = {
     content: string;
     rawResponse: string;
     providerKind: LlmProviderKind;
+    /** 流式路径累计到的 usage；厂商未下发则为 undefined（按量计费会据此跳过，避免瞎估） */
+    usage?: LlmStreamUsage;
 };
 
 export type ChatCompletionStreamCallbacks = {
@@ -666,6 +703,19 @@ export type ChatCompletionStreamCallbacks = {
     onReasoningDelta?: (text: string) => void | Promise<void>;
     onToolCallStart?: (info: { id: string; name: string; index: number }) => void | Promise<void>;
 };
+
+/**
+ * 一次调用成功后的自动扣费：按该 API 配置的单价，从它所属账户（= 所在文件夹）扣一笔。
+ * 记账绝不该影响聊天主流程，所以整段吞异常，只在控制台留一行。
+ * 注意：这里必须保持「每次真实调用只记一次」——各 sendLLM* 是并列出口，互相不调用。
+ */
+function chargeForLlmCall(config: ApiConfig, usage?: LlmUsageLike): void {
+    try {
+        recordLlmSpend(config, usage);
+    } catch (error) {
+        console.warn("[ChatEngine] 自动扣费失败（不影响本次调用）", error);
+    }
+}
 
 function attachExternalAbort(internal: AbortController, external?: AbortSignal): () => void {
     if (!external) return () => {};
@@ -734,13 +784,15 @@ async function readSseStream(
     providerKind: ChatCompletionStreamResult["providerKind"],
     callbacks?: ChatCompletionStreamCallbacks,
     stripTimestamps = true,
-): Promise<{ content: string; rawResponse: string }> {
+): Promise<{ content: string; rawResponse: string; usage?: LlmStreamUsage }> {
     if (!response.body) throw new ChatEngineError("流式响应没有 body。");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
     let rawResponse = "";
+    // 累计 usage：厂商/中转在末尾 chunk 里给就记下来，用于按量计费与日志展示
+    let usage: LlmStreamUsage | undefined;
     // 时间戳剥离器会一直扣住流尾巴的 64 个字符等括号闭合，流结束才吐出来。
     // 要求"所见即模型所写"的调用方（独家特调）把它整个关掉：增量来一个字出一个字，
     // 否则模型在末尾写机括标记行（〔记〕这类）时，整行都压在扣留窗里，看起来像卡死。
@@ -751,6 +803,8 @@ async function readSseStream(
     // 容错解析：中转把长 JSON 行切开时做碎片重组，不再静默丢增量（见 sse-json.ts）
     const sseParser = createSseJsonParser();
     const handleParsed = async (parsed: unknown) => {
+        const chunkUsage = (parsed as { usage?: LlmStreamUsage } | null)?.usage;
+        if (chunkUsage) usage = chunkUsage;
         const parts = parseProviderStreamDelta(providerKind, parsed);
         if (parts.reasoning) {
             await callbacks?.onReasoningDelta?.(parts.reasoning);
@@ -793,7 +847,7 @@ async function readSseStream(
         content += finalContent;
         await callbacks?.onDelta?.(finalContent);
     }
-    return { content, rawResponse };
+    return { content, rawResponse, usage };
 }
 
 export async function sendLLMStreamRequest(
@@ -815,6 +869,23 @@ export async function sendLLMStreamRequest(
     },
     callbacks?: ChatCompletionStreamCallbacks,
 ): Promise<ChatCompletionStreamResult> {
+    // 防御性兜底：API 配置全局关闭流式时，直接降级为非流式请求，
+    // 避免上层判断疏漏导致仍发 SSE 请求。
+    if (config.enableStreaming === false) {
+        const content = await sendLLMRequest(config, preset, messages, regexes, meta, {
+            skipOutputRegex: options?.skipOutputRegex,
+            includeReasoning: options?.includeReasoning,
+            appId: options?.appId,
+            appTags: options?.appTags,
+            followUpCount: options?.followUpCount,
+            debugSessionId: options?.debugSessionId,
+            signal: options?.signal,
+            onReasoning: (text) => callbacks?.onReasoningDelta?.(text),
+        });
+        // 非流式结果一次性吐出，保持流式回调契约一致
+        callbacks?.onDelta?.(content);
+        return { content, rawResponse: content, providerKind: providerKindForConfig(config) };
+    }
     const pluginPurpose = options?.appId ?? "chat";
     const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
     const effectivePreset = afterPlugins.preset;
@@ -850,7 +921,7 @@ export async function sendLLMStreamRequest(
                 await (pluginCallbacks ?? callbacks)?.onReasoningDelta?.(text);
             },
         };
-        const { content: streamedContent, rawResponse } = await readSseStream(response, request.providerKind, streamLogCallbacks, !options?.skipTimestampStrip);
+        const { content: streamedContent, rawResponse, usage: streamedUsage } = await readSseStream(response, request.providerKind, streamLogCallbacks, !options?.skipTimestampStrip);
         if (!streamedContent.trim()) {
             throw new ChatEngineError("流式响应没有解析到文本增量。");
         }
@@ -870,7 +941,9 @@ export async function sendLLMStreamRequest(
             messages: sanitizedMessages,
             rawResponse: rawOutput,
             reasoning: streamedReasoning.trim() || undefined,
+            usage: streamedUsage,
         });
+        chargeForLlmCall(config, streamedUsage);
 
         if (!options?.skipOutputRegex) {
             const macroEngine = new MacroEngine(meta?.characterName ?? "", meta?.userName ?? "用户");
@@ -883,7 +956,7 @@ export async function sendLLMStreamRequest(
                 protectedText => applyOutputRegex(protectedText, regexes, { macroEngine, activeTags }),
             );
         }
-        return { content: rawOutput, rawResponse, providerKind: request.providerKind };
+        return { content: rawOutput, rawResponse, providerKind: request.providerKind, usage: streamedUsage };
     } catch (error: unknown) {
         if (error instanceof DOMException && (error as DOMException).name === "AbortError") {
             if (options?.signal?.aborted) throw error;
@@ -1009,6 +1082,7 @@ export async function sendLLMRequest(
             // 思维链只经 onReasoning 回调透传，之前没进日志；这里单独存一份原文
             reasoning: parsed.reasoning || undefined,
         });
+        chargeForLlmCall(config, parsed.usage);
 
         if (options?.skipOutputRegex) {
             return rawOutput;
@@ -1118,6 +1192,19 @@ export async function sendLLMToolStreamRequest(
     },
     callbacks?: ChatCompletionStreamCallbacks,
 ): Promise<LLMToolRequestResult> {
+    // 防御性兜底：API 配置关闭流式时，直接降级为非流式工具请求
+    if (config.enableStreaming === false) {
+        const result = await sendLLMToolRequest(config, preset, messages, tools, regexes, meta, {
+            appId: options?.appId,
+            appTags: options?.appTags,
+            followUpCount: options?.followUpCount,
+            debugSessionId: options?.debugSessionId,
+            signal: options?.signal,
+        });
+        callbacks?.onDelta?.(result.content);
+        if (result.reasoning) callbacks?.onReasoningDelta?.(result.reasoning);
+        return result;
+    }
     void regexes;
     const pluginPurpose = options?.appId ?? "chat";
     const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
@@ -1228,6 +1315,8 @@ export async function sendLLMToolStreamRequest(
             rawResponse: logEntryRaw,
             reasoning: reasoning || undefined,
         });
+        // 原生工具流式这条链路没有解析 usage：按次计价的配置照扣，按量计价的会跳过（避免瞎估）
+        chargeForLlmCall(config, undefined);
 
         if (!content && toolCalls.length === 0 && truncatedNames.length === 0) {
             throw new ChatEngineError("原生动作流式响应没有解析到文本或动作。");
@@ -1330,6 +1419,7 @@ export async function sendLLMToolRequest(
             rawResponse,
             usage: parsed.usage,
         });
+        chargeForLlmCall(config, parsed.usage);
 
         if (!options?.skipOutputRegex && rawOutput) {
             const macroEngine = new MacroEngine(meta?.characterName ?? "", meta?.userName ?? "用户");
@@ -2094,7 +2184,7 @@ export async function generateOfflineChatCompletion(
         onReasoning: (t: string) => { reasoning = t; },
     };
     let rawOutput: string;
-    if (isSessionStreamingEnabled(session, false) && options?.onStreamDelta) {
+    if (isStreamingEnabled(config, session, false) && options?.onStreamDelta) {
         // 线下流式：正文边生成边通过 onStreamDelta 交给 UI 做实时预览；
         // 摘要补提仍走整段请求（输出短，无需流式）。
         const streamResult = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
@@ -2206,7 +2296,7 @@ async function generateNativeChatCompletion(
     for (let round = 0; round < maxToolRounds; round += 1) {
         let result: LLMToolRequestResult;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (isStreamingEnabled(config, session, true)) {
                 let streamReasoning = "";
                 result = await sendLLMToolStreamRequest(
                     config,
@@ -2661,7 +2751,7 @@ async function generateChatCompletionCore(
     for (let round = 0; round < maxToolRounds; round++) {
         let filteredOutput: string;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (isStreamingEnabled(config, session, true)) {
                 // 流式分支：与 sendLLMRequest 走同一套请求构造/日志/正则，仅把「整段等待」换成
                 // SSE 增量，并通过 onStreamDelta 把原文增量实时交给 UI 层做预览显示。
                 let streamReasoning = "";
@@ -2890,7 +2980,7 @@ async function generateChatCompletionCore(
             if (round === maxToolRounds - 1) {
                 try {
                     let finalOutput: string;
-                    if (isSessionStreamingEnabled(session, true)) {
+                    if (isStreamingEnabled(config, session, true)) {
                         let streamReasoning = "";
                         const streamFinal = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
                             appId: options?.appId ?? "chat",

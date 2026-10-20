@@ -554,7 +554,7 @@ export async function generateCoCreateReply(
     let cleanOutput = "";
     let toolCalls: CoCreateToolCall[] = [];
 
-    if (workingSession.settings.streamingEnabled) {
+    if (workingSession.settings.streamingEnabled && runtime.apiConfig.enableStreaming !== false) {
       let streamedRaw = "";
       let processedIndex = 0;
       let streamVisibleText = "";

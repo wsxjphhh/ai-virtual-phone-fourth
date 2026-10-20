@@ -4,6 +4,8 @@ import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import type { Character } from "./character-types";
 import type { MomentComment, MomentLike, MomentPost } from "./moments-types";
 import { loadUserIdentities, resolveUserIdentity } from "./settings-storage";
+import { createId as generateId } from "./id-utils";
+
 
 const CHARACTER_WORLDS_KEY = "ai_phone_character_worlds_v1";
 export const CHARACTER_WORLDS_UPDATED_EVENT = "character-worlds-updated";
@@ -51,10 +53,6 @@ export type CharacterWorldGroup = {
 
 function isBrowser(): boolean {
     return typeof window !== "undefined";
-}
-
-function generateId(prefix: string): string {
-    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
 function dispatchUpdated(): void {

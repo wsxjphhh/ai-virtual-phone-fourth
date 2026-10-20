@@ -10,6 +10,7 @@ import { UserProfilePanel } from "./user-profile-panel";
 import { MessageCircle, Users, Aperture, UserRound } from "lucide-react";
 import { ChatSession, type ChatMessage, loadChatSessions, pushChatMessage, hydrateChatStorage, markChatSessionRead, setActiveChatSessionId } from "@/lib/chat-storage";
 import type { MomentPost } from "@/lib/moments-types";
+
 import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { loadCharacters } from "@/lib/character-storage";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
@@ -61,6 +62,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     // React to external session navigation (e.g., incoming call acceptance)
     // Only fires when initialSessionId CHANGES after mount (mount case handled by hydration above)
     const prevInitSessionId = useRef(initialSessionId);
+
     useEffect(() => {
         if (initialSessionId === prevInitSessionId.current) return;
         prevInitSessionId.current = initialSessionId;
@@ -257,6 +259,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
     if (!dbReady) return null;
 
     return (
+
         <div
             className="chat-app absolute inset-0 flex flex-col overflow-hidden z-10"
             {...(activeSession || activeMascot ? { "data-room-active": "" } : {})}
@@ -265,6 +268,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             {/* Homepage appearance CSS is the lowest chat styling layer. */}
             {chatAppCSS && <SessionCustomCSS css={chatAppCSS} scope=".chat-app" />}
             {/* The Main Content Area */}
+
             <div className="chat-main-content relative flex-1 flex flex-col overflow-hidden" {...(activeSession || activeMascot ? { "data-covered-by-room": "" } : {})}>
                 {activeTab === "messages" && <ChatMessageList onCloseApp={onClose} activeSession={activeSession} onSelectSession={(session) => { setActiveMascot(false); setActiveSession(session); }} onSelectMascot={handleSelectMascot} />}
                 {activeTab === "contacts" && (
@@ -290,6 +294,7 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
             </div>
 
             {/* Bottom Navigation Bar — hide when inside a chat room */}
+
             <nav className="chat-tab-bar chat-bottom-glass-bar" data-ui="nav" style={{ display: activeSession || activeMascot || hideTabBar ? "none" : undefined }}>
                 <button
                     className={`chat-tab ${activeTab === "messages" ? "chat-tab-active" : ""}`}
@@ -336,6 +341,20 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
                                 return next;
                             });
                             setActiveSession(null);
+                        }}
+                        onSwitchSession={(sessionId) => {
+                            if (!sessionId) { setActiveSession(null); return; }
+                            // 多会话：切换到另一条对话线程（可能是刚新建的）
+                            const s = loadChatSessions().find(x => x.id === sessionId);
+                            if (!s) return;
+                            setActiveMascot(false);
+                            setVisitedSessions(prev => {
+                                const next = new Map(prev);
+                                next.set(s.id, s);
+                                return next;
+                            });
+                            setActiveSession(s);
+                            setActiveTab("messages");
                         }}
                     />
                 </div>

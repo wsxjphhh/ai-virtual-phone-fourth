@@ -1,6 +1,8 @@
 import Dexie from "dexie";
 import { formatChatTimestamp } from "./llm-prompt-assembler";
 import { hydrateKvDb, kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { createId as generateId } from "./id-utils";
+
 
 export type StoryUiPrefs = {
   hideBubble?: boolean;
@@ -506,10 +508,6 @@ registerKvMigration(STORY_GROUPS_KEY);
 let _hydrated = false;
 let _sessionsCache: StorySession[] = [];
 let _messagesCache: StoryMessage[] = [];
-
-function generateId(prefix: string): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
 
 function parseTime(value: string | undefined): number {
   if (!value) return 0;

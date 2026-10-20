@@ -8,6 +8,7 @@ import { getLastChatOfflineTurn, loadChatOfflineTurns, saveChatOfflineTurns } fr
 import { removeChatSessionCompletely } from "./chat-session-remove";
 import {
     getLastVisibleSessionMessage,
+    isExplicitlySeparateSession,
     loadChatSessions,
     reassignChatSessionMessages,
     saveChatSessions,
@@ -54,6 +55,7 @@ function sessionActivityTime(session: ChatSession): number {
 }
 
 function duplicateKey(session: ChatSession): string | null {
+    if (isExplicitlySeparateSession(session)) return null;
     const accountScope = session.chatAccountId || "main";
     if (!session.isGroup) return `account:${accountScope}:direct:${session.contactId}`;
     const members = [...(session.participantIds || [])].sort();

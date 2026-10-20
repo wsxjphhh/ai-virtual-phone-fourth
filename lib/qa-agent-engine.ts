@@ -706,27 +706,60 @@ async function callQaAgentNative(apiConfig: ApiConfig, history: QaEngineMessage[
 
         const messages: LlmRequestMessage[] = [{ role: "system", content: systemPrompt }, ...working];
         let result: LLMToolRequestResult;
-        try {
-            result = await sendLLMToolStreamRequest(
-                apiConfig,
-                null,
-                messages,
-                tools,
-                [],
-                { characterName: "工坊", userName: "用户" },
-                { appId: "qa", signal: options?.signal, maxTokens: getQaMaxOutputTokens() ?? undefined },
-                {
-                    async onDelta(delta) {
-                        await filter.push(delta);
+        const streamingEnabled = apiConfig.enableStreaming !== false;
+        if (streamingEnabled) {
+            try {
+                result = await sendLLMToolStreamRequest(
+                    apiConfig,
+                    null,
+                    messages,
+                    tools,
+                    [],
+                    { characterName: "工坊", userName: "用户" },
+                    { appId: "qa", signal: options?.signal, maxTokens: getQaMaxOutputTokens() ?? undefined },
+                    {
+                        async onDelta(delta) {
+                            await filter.push(delta);
+                        },
+                        async onReasoningDelta(delta) {
+                            await callbacks?.onReasoningDelta?.(delta);
+                        },
                     },
-                    async onReasoningDelta(delta) {
-                        await callbacks?.onReasoningDelta?.(delta);
-                    },
-                },
-            );
-        } catch (streamError) {
-            if (options?.signal?.aborted) throw streamError;
-            await callbacks?.onStreamFallback?.(formatQaErrorMessage(streamError));
+                );
+            } catch (streamError) {
+                if (options?.signal?.aborted) throw streamError;
+                await callbacks?.onStreamFallback?.(formatQaErrorMessage(streamError));
+                const fallbackRequest = buildProviderRequest(apiConfig, null, messages, { tools, maxTokens: getQaMaxOutputTokens() ?? undefined });
+                const response = await fetchLlmPayload(fallbackRequest, { signal: options?.signal });
+                if (!response.ok) throw new Error(`API ${response.status}: ${await response.text()}`);
+                const parsed = parseProviderResponse(fallbackRequest.providerKind, await response.json());
+                if (parsed.content) await filter.push(parsed.content);
+                result = {
+                    content: parsed.content || "",
+                    reasoning: parsed.reasoning,
+                    openRouterReasoningDetails: parsed.openRouterReasoningDetails,
+                    toolCalls: parsed.toolCalls || [],
+                    rawResponse: "",
+                    providerKind: fallbackRequest.providerKind,
+                };
+                // 流式失败转非流式成功的这一跳也要进工坊「调用记录」：主路径（sendLLMToolStreamRequest）
+                // 由聊天引擎按 appId 分流落日志，这条 fallback 是本文件自己发的请求，不补就漏一条，
+                // 而恰恰是刚出过流式故障、最需要排障记录的场景。
+                pushApiLog({
+                    characterName: "工坊",
+                    source: "qa",
+                    channel: "qa",
+                    model: apiConfig.defaultModel,
+                    messages: fallbackRequest.messagesForLog.map(m => ({
+                        role: m.role,
+                        content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
+                    })),
+                    rawResponse: JSON.stringify({ content: result.content, reasoning: result.reasoning, toolCalls: result.toolCalls }),
+                    reasoning: parsed.reasoning?.trim() || undefined,
+                    usage: parsed.usage,
+                });
+            }
+        } else {
             const fallbackRequest = buildProviderRequest(apiConfig, null, messages, { tools, maxTokens: getQaMaxOutputTokens() ?? undefined });
             const response = await fetchLlmPayload(fallbackRequest, { signal: options?.signal });
             if (!response.ok) throw new Error(`API ${response.status}: ${await response.text()}`);
@@ -740,9 +773,6 @@ async function callQaAgentNative(apiConfig: ApiConfig, history: QaEngineMessage[
                 rawResponse: "",
                 providerKind: fallbackRequest.providerKind,
             };
-            // 流式失败转非流式成功的这一跳也要进工坊「调用记录」：主路径（sendLLMToolStreamRequest）
-            // 由聊天引擎按 appId 分流落日志，这条 fallback 是本文件自己发的请求，不补就漏一条，
-            // 而恰恰是刚出过流式故障、最需要排障记录的场景。
             pushApiLog({
                 characterName: "工坊",
                 source: "qa",

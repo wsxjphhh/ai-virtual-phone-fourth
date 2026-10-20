@@ -1,7 +1,7 @@
 import { getThemeAssetDataUrl, saveThemeAssetFromBlob } from "./theme-storage";
 import type { ThemeAssetType } from "./theme-types";
 
-// We can leverage the existing IndexedDB logic in theme-storage.ts by 
+// We can leverage the existing IndexedDB logic in theme-storage.ts by
 // just casting a custom type like "chat_bg" to ThemeAssetType to store chat assets.
 
 export async function saveChatImageToIndexedDB(blob: Blob): Promise<string> {

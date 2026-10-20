@@ -2,6 +2,7 @@
 // Group chat engine: single API call for all characters.
 
 import { ChatSession, ChatMessage, loadChatAppSettings, createResponseBatchId, createResponseRoundId, createToolExecutionId, loadChatSessions, getLatestCharacterStateValues, isSessionStreamingEnabled, resolveVisionImagePromptLimit } from "./chat-storage";
+
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
 import type { ApiConfig, PresetConfig, RegexConfig } from "./settings-types";
 import { loadCharacters } from "./character-storage";
@@ -14,6 +15,7 @@ import {
     sendLLMToolRequest,
     sendLLMToolStreamRequest,
     ChatEngineError,
+    isStreamingEnabled,
     buildMusicLocalMacro,
     buildMusicCloudMacro,
     buildChatBilingualInstruction,
@@ -590,7 +592,7 @@ async function runNativeGroupToolLoop(params: {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
         let result: Awaited<ReturnType<typeof sendLLMToolRequest>>;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (isStreamingEnabled(config, session, true)) {
                 let streamReasoning = "";
                 result = await sendLLMToolStreamRequest(config, preset, requestMessages, nativeBundle.definitions, regexes, meta, {
                     appId: "group_chat",
@@ -842,7 +844,7 @@ export async function generateGroupChatCompletion(
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         let filteredOutput: string;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (isStreamingEnabled(config, session, true)) {
                 let streamReasoning = "";
                 const streamResult = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
                     appId: "group_chat",
@@ -1017,7 +1019,7 @@ export async function generateGroupChatCompletion(
 
             if (round === MAX_TOOL_ROUNDS - 1) {
                 try {
-                    if (isSessionStreamingEnabled(session, true)) {
+                    if (isStreamingEnabled(config, session, true)) {
                         let streamReasoning = "";
                         const streamFinal = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
                             appId: "group_chat",
@@ -1158,7 +1160,7 @@ export async function generateGroupOfflineChatCompletion(
         onReasoning: (t: string) => { reasoning = t; },
     };
     let rawOutput: string;
-    if (isSessionStreamingEnabled(session, false) && options?.onStreamDelta) {
+    if (isStreamingEnabled(config, session, false) && options?.onStreamDelta) {
         const streamResult = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
             appId: "group_chat",
             appTags: ["group_chat", "offline"],

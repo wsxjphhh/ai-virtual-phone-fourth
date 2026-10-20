@@ -58,6 +58,172 @@ export function shouldRequestPwaFullscreen(): boolean {
   return !/Edg/i.test(navigator.userAgent);
 }
 
+/** ── 「全屏与方向锁」用户可选策略 ──
+ *  全屏和锁方向是绑在一起的：只有进了全屏，`screen.orientation.lock` 才被允许；
+ *  而不少国产壳接受全屏却拒绝锁方向（2026-10-20 真机日志实测），于是全屏变成了
+ *  "画面躺倒 + 连地址栏都没有"。默认口径是"锁不住就退回浏览器态"——竖屏可用优先。
+ *  这里给设置面板留出反悔的口子：
+ *  - auto   默认。请求全屏，锁得住才留；锁不住立刻退出全屏（露地址栏但绝不躺倒）。
+ *  - always 沉浸优先。锁不住也留在全屏里，方向交给浏览器自己（横屏风险自负）。
+ *  - never  从不请求全屏。一定竖屏，代价是浏览器界面一直在。
+ *  存 localStorage 而不是 cookie：这是纯端上的显示策略，不参与 manifest 计算
+ *  （装到桌面的形态归上面那个 cookie 管），也不需要服务端知道。 */
+export const IMMERSIVE_POLICY_STORAGE_KEY = "aiphone_immersive_fullscreen_policy";
+export const IMMERSIVE_POLICY_CHANGED_EVENT = "aiphone-immersive-fullscreen-policy-changed";
+export type ImmersiveFullscreenPolicy = "auto" | "always" | "never";
+const IMMERSIVE_POLICIES: ImmersiveFullscreenPolicy[] = ["auto", "always", "never"];
+
+export function readImmersiveFullscreenPolicy(): ImmersiveFullscreenPolicy {
+  if (typeof window === "undefined") return "auto";
+  try {
+    const raw = window.localStorage.getItem(IMMERSIVE_POLICY_STORAGE_KEY);
+    return IMMERSIVE_POLICIES.includes(raw as ImmersiveFullscreenPolicy)
+      ? (raw as ImmersiveFullscreenPolicy)
+      : "auto";
+  } catch {
+    /* 无痕模式 / 存储被禁：按默认口径走 */
+    return "auto";
+  }
+}
+
+export function writeImmersiveFullscreenPolicy(policy: ImmersiveFullscreenPolicy) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(IMMERSIVE_POLICY_STORAGE_KEY, policy);
+  } catch {
+    /* 写不进去也不阻塞 UI，本次会话按默认口径继续 */
+  }
+  window.dispatchEvent(new CustomEvent(IMMERSIVE_POLICY_CHANGED_EVENT, { detail: policy }));
+}
+
+/** ── 手机端布局判定（唯一入口，CSS 的 phone-shell 媒体查询与此保持同源） ──
+ *  竖屏看视口宽度；横屏改看"矮视口 + 触摸"：手机横屏高约 390，平板横屏 600 以上，
+ *  用 max-height 能把平板留在桌面舞台。
+ *  刻意拆成两条 Level 3 查询而不是用 `or` 分组——老内核解析不了整条查询时会整条判 false，
+ *  手机布局会被直接丢掉（这正是"横屏后掉回 390×844 桌面壳、只看得见一小截"的成因）。 */
+export const MOBILE_PORTRAIT_MEDIA = "(max-width: 500px) and (hover: none) and (pointer: coarse)";
+export const MOBILE_LANDSCAPE_MEDIA =
+  "(max-height: 500px) and (orientation: landscape) and (hover: none) and (pointer: coarse)";
+
+export function isMobilePhoneViewport(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.matchMedia(MOBILE_PORTRAIT_MEDIA).matches
+    || window.matchMedia(MOBILE_LANDSCAPE_MEDIA).matches;
+}
+
+/** 当前视口是否横向；screen.orientation.type 更准，拿不到时退回宽高比较。 */
+function isViewportLandscape(): boolean {
+  if (typeof window === "undefined") return false;
+  const type = screen?.orientation?.type;
+  if (type) return type.startsWith("landscape");
+  return window.innerWidth > window.innerHeight;
+}
+
+/** 方向锁在本机的可信程度。一次会话里只实测一次，结果决定后面还赌不赌全屏：
+ *  - unknown：还没试过
+ *  - locked：lock("portrait") 真的应答了
+ *  - unsupported：没有该 API 或被拒——这台设备用全屏换不来竖屏，别再请求 */
+export type PortraitLockState = "unknown" | "locked" | "unsupported";
+let portraitLockState: PortraitLockState = "unknown";
+let landscapeWatchdogBound = false;
+
+export function getPortraitLockState(): PortraitLockState {
+  return portraitLockState;
+}
+
+/** 尝试把方向锁回竖屏，**把结果如实返回**。
+ *  全屏态才允许 lock，所以只能在 requestFullscreen 成功后调。
+ *  这里刻意不吞失败：2026-10-20 的真机日志（PKS110 / Android 16，`fullscreen:"html"`
+ *  + `orientType:"landscape-primary"` + `screen 804x360`）显示，旧写法用
+ *  `.catch(() => {})` 把"锁不上"静默吃掉，页面已经脱离了浏览器地址栏这道保护，
+ *  又没能锁住方向，于是壳在全屏态跟着传感器转横（系统自动旋转关着也照样转），
+ *  390 竖屏稿被压进 360 高——"打开就躺倒、只看得见一小截"就是这么来的。 */
+async function tryLockPortrait(): Promise<boolean> {
+  if (typeof screen === "undefined") return false;
+  const orientation = screen.orientation as
+    (ScreenOrientation & { lock?: (value: string) => Promise<void> }) | undefined;
+  if (!orientation?.lock) return false;
+  try {
+    await orientation.lock("portrait");
+    return true;
+  } catch {
+    /* iOS Safari 无此 API、老内核在非手势调用里直接 throw、部分壳直接 reject */
+    return false;
+  }
+}
+
+async function exitFullscreenQuietly(): Promise<void> {
+  if (typeof document === "undefined") return;
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+  } catch {
+    /* 已经不在全屏，或这个壳不让退 */
+  }
+}
+
+/** 借一次用户手势确认"全屏 + 竖屏"能不能同时成立：能就留全屏，不能就退回浏览器态。
+ *  调用点都在 click 里，requestFullscreen / orientation.lock 需要的用户激活是够的。
+ *  策略为 always（沉浸优先）时，锁不住也留在全屏里——那是用户在设置里明确选的取舍。 */
+async function securePortraitInsideFullscreen(): Promise<void> {
+  const locked = await tryLockPortrait();
+  const immersiveFirst = readImmersiveFullscreenPolicy() === "always";
+  portraitLockState = locked ? "locked" : "unsupported";
+  if (!locked && !immersiveFirst) await exitFullscreenQuietly();
+}
+
+/** 全屏态下视口转横的兜底：连 screen.orientation.lock 报成功却仍然转横的壳
+ *  （"接受但不生效"那一种），也不能让她停在没法用的画面里。退出全屏后壳一般会转回竖屏。
+ *  退一次就把状态判死，免得下一次点击又请求全屏→又转横→又退，来回抖。
+ *  只服务于默认口径：always 是用户自愿承担横屏换沉浸，never 本来就不会在全屏里。 */
+function bindLandscapeWatchdog(): void {
+  if (typeof window === "undefined" || landscapeWatchdogBound) return;
+  landscapeWatchdogBound = true;
+  const onMaybeLandscape = () => {
+    if (readImmersiveFullscreenPolicy() !== "auto") return;
+    if (portraitLockState === "unsupported") return;
+    if (!document.fullscreenElement || !isViewportLandscape()) return;
+    portraitLockState = "unsupported";
+    void exitFullscreenQuietly();
+  };
+  window.addEventListener("orientationchange", onMaybeLandscape);
+  window.addEventListener("resize", onMaybeLandscape);
+  // 设置里改策略要当场生效：判死记录清零（换成 always/never 后不该沿用旧的探测结论）；
+  // 切到 never 时若此刻正处在我们请求来的全屏里，立刻退出来，不用等下一次点击。
+  window.addEventListener(IMMERSIVE_POLICY_CHANGED_EVENT, (event) => {
+    const detail = (event as CustomEvent<string>).detail;
+    portraitLockState = "unknown";
+    if (detail === "never" && document.fullscreenElement) void exitFullscreenQuietly();
+  });
+}
+
+/** 沉浸全屏请求：偏好关闭、策略选了"从不全屏"、本机已证明锁不住竖屏、
+ *  或视口本来就是横向的都不请求；已经在全屏里则用来补锁（上一次进入时可能还没走到这一步）。 */
+export function requestMobileImmersiveFullscreen(): void {
+  if (typeof document === "undefined") return;
+  bindLandscapeWatchdog();
+  if (!shouldRequestPwaFullscreen()) return;
+  const policy = readImmersiveFullscreenPolicy();
+  if (policy === "never") return;
+  // 判死只对默认口径生效：always 是"无论如何都要沉浸"，每次点击都该继续试。
+  if (policy !== "always" && portraitLockState === "unsupported") return;
+  if (isViewportLandscape()) {
+    // 僵局的入口：进来就已经是横屏全屏（旧版本留下的状态），用这次手势把它拉回竖屏。
+    if (document.fullscreenElement) void securePortraitInsideFullscreen();
+    return;
+  }
+  if (document.fullscreenElement) return;
+  const doc = document.documentElement;
+  const request = doc.requestFullscreen?.();
+  if (request && typeof request.then === "function") {
+    request.then(() => void securePortraitInsideFullscreen()).catch(() => {
+      /* 全屏请求本身被拒：保持浏览器 UI，竖屏照常可用 */
+    });
+  } else {
+    // 老内核不返回 Promise，无法确认结果；仍尝试一次锁，锁不上就退回浏览器态。
+    void securePortraitInsideFullscreen();
+  }
+}
+
 export function getRuntimePwaDisplayMode(): RuntimePwaDisplayMode {
   if (typeof window === "undefined" || typeof document === "undefined") return "browser";
   if (document.fullscreenElement || window.matchMedia("(display-mode: fullscreen)").matches) {

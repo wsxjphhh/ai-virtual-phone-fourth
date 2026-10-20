@@ -27,6 +27,7 @@ import { CardGrid, FeaturedCard, type CardItem, type FeaturedCardItem } from "./
 import { GlassIcon } from "./ui/glass-icon";
 import { Toggle } from "./ui/form";
 import { loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
+import { setControlEnabled } from "@/lib/floating-controls-store";
 import { loadKeepAlive, saveKeepAlive } from "@/lib/weixin-storage";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 
@@ -236,6 +237,9 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
     const handleQuickActionChange = useCallback((next: boolean) => {
         setQuickActionEnabled(next);
         saveChatAppSettings({ ...loadChatAppSettings(), quickActionEnabled: next });
+        // 快捷切换的入口已经归统一控制坞，这里同步写坞的「可使用」，
+        // 否则会出现"设置里关了、坞里按钮照样点亮"的两套状态
+        setControlEnabled("quick-action", next);
         onNotice(next ? "已开启快捷操作" : "已关闭快捷操作");
     }, [onNotice]);
 

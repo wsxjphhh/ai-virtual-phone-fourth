@@ -4,14 +4,18 @@
 // 玩家右侧气泡、小票全宽卡；全程无任何标签徽章，保沉浸。
 // 装饰材料的 CSS 以 <style> 注入本画面容器（认 .mix-* 官方语义类）。
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { ChevronLeft, Copy, History, MoreHorizontal, Pencil, Plus, RotateCcw, Send, Sun, WandSparkles, X } from "lucide-react";
-import { continueMix, editMixTurn, generateMixReply, canReplayMixFrom, MIX_STORE_SNAPSHOT_TURNS, mixTurnRawText, recordMixPanelStore, refreshMixOpening, regenerateMixTail, rerollMixReply, rerunMixFilters, runMixEditSync, runMixSessionEnd, truncateMixAfterTurn } from "@/lib/mixology/engine";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { ChevronLeft, Copy, GitBranch, History, MoreHorizontal, Pencil, Plus, RotateCcw, Send, Sun, WandSparkles, X } from "lucide-react";
+import { continueMix, editMixTurn, forkMixSession, generateMixReply, canReplayMixFrom, MIX_STORE_SNAPSHOT_TURNS, mixRoundCount, mixTurnRawText, recordMixPanelStore, refreshMixOpening, regenerateMixTail, rerollMixReply, rerunMixFilters, runMixEditSync, runMixSessionEnd, truncateMixAfterTurn } from "@/lib/mixology/engine";
+import { MixBalanceChip } from "./mix-balance-chip";
+import { ApiAccountPanel } from "@/components/settings/api-account-panel";
+import { accountLabel, getApiAccount } from "@/lib/api-accounts";
+import { resolveMixAccountId, snapshotMixAccount } from "@/lib/mixology/account";
 import { findMixConnector, getMixMaterial, getMixSession, isMixBuiltinId, listMixPickables, MIX_CABINET_UPDATED_EVENT, resolveMixRecipeMaterials, saveMixMaterial, saveMixSession } from "@/lib/mixology/storage";
 import { applyMixMacros, MIX_DEFAULT_USER_NAME } from "@/lib/mixology/assembler";
 import { buildMixConditionContext, pickActiveMixMaterials } from "@/lib/mixology/state";
 import { scopeMixCss } from "@/lib/mixology/css-scope";
-import { MIX_KIND_LABELS, MIX_SLOT_ORDER, mixEncoreRenderHtml, mixPanelLayoutOf, mixPanelSlotOf, mixSlotEntries, mixTurnEncoreBlocks, mixTurnTicketBlocks, type MixCharacterCard, type MixFilterRule, type MixMaterial, type MixMaterialKind, type MixMechanismMaterial, type MixPanelLayout, type MixSession, type MixSlotEntry, type MixState, type MixTicketMaterial, type MixTurn, type MixDialogueButton } from "@/lib/mixology/types";
+import { MIX_KIND_LABELS, MIX_SLOT_ORDER, mixEncoreRenderHtml, mixPanelLayoutOf, mixPanelSlotOf, mixSessionTitle, mixSlotEntries, mixTurnEncoreBlocks, mixTurnTicketBlocks, type MixCharacterCard, type MixFilterRule, type MixMaterial, type MixMaterialKind, type MixMechanismMaterial, type MixPanelLayout, type MixSession, type MixSlotEntry, type MixState, type MixTicketMaterial, type MixTurn, type MixDialogueButton } from "@/lib/mixology/types";
 import { applyMixFilterRules, mixStreamText } from "@/lib/mixology/prose";
 import { MixProseView } from "./prose-view";
 import { MixRichText } from "./rich-text";
@@ -26,15 +30,60 @@ import { playMixAudio, primeMixAudio, stopMixAudio } from "@/lib/mixology/audio-
 import type { MixProseDialogue } from "./prose-view";
 import { MixSlotEditor } from "./slot-editor";
 import { MixMaterialEditor } from "./mixology-editor";
+import { MixSessionSwitcher } from "./mix-session-switcher";
+import { MixSessionTree } from "./mix-session-tree";
+import { MixStoryRail } from "./mix-story-rail";
+import { MixStoryCompass } from "./mix-story-compass";
+import { MixModelBadge } from "./mix-model-badge";
+import {
+    FOLLOW_MODE_HINTS,
+    FOLLOW_MODE_LABELS,
+    compassAnchorId,
+    pairMixRounds,
+    readCompassPrefs,
+    writeCompassPrefs,
+    type CompassPrefs,
+    type CompassRound,
+    type FollowMode,
+} from "@/lib/mixology/story-compass";
+import {
+    CONTROL_DOCK_ACTIVATE_EVENT,
+    getControlDockState,
+    subscribeControlDockState,
+} from "@/lib/floating-controls-store";
 import { disposeMixSandboxesForMaterial } from "@/lib/mixology/mechanism-runtime";
+import {
+    subscribeMixSessionRuntime,
+    getMixSessionRuntimeState,
+    enqueueMixGeneration,
+    cancelMixGeneration,
+    getMixSessionGenStatus,
+} from "@/lib/mixology/session-runtime";
+import {
+    subscribeMixPending,
+    getMixPendingState,
+    getMixPendingQueue,
+    isMixPendingPaused,
+    setMixPendingPaused,
+    pushMixPending,
+    takeMixPending,
+    removeMixPending,
+    clearMixPending,
+    MIX_PENDING_MAX,
+    type MixPendingItem,
+} from "@/lib/mixology/pending-queue";
 
 /** 当前真正挂着的对局：严格模式的重复挂载靠它区分「真退出」与「假卸载」 */
 const liveMixGames = new Set<string>();
+
+/** 缓冲发送区空队列兜底：useSyncExternalStore 要求未变化时同引用，不能每次现造 [] */
+const EMPTY_MIX_PENDING: MixPendingItem[] = [];
 
 type GameProps = {
     sessionId: string;
     onBack: () => void;
     onToast: (message: string) => void;
+    onSwitchSession?: (sessionId: string) => void;
 };
 
 /** 一轮里要渲染的一块（状态栏/小剧场）：皮 + 这一轮的原文 */
@@ -49,6 +98,17 @@ const MIX_INITIAL_TURNS = 12;
 const MIX_LOAD_MORE_TURNS = 12;
 /** 回溯把轮次砍短后至少还露着几条（不足就把收起数往回让） */
 const MIX_MIN_VISIBLE_TURNS = 4;
+/**
+ * 跳转（罗盘 / 侧轨点某一轮）时一次只铺开这么多条。
+ *
+ * 以前跳旧剧情是把「目标那一轮一直到最新一条」整段铺出来：那一局 126 条 50 万字，
+ * 从第 1 轮跳一下就是 126 行 DOM + 68 个沙盒 iframe，开发机实测首帧长任务 1973ms，
+ * 真机 2.9~4.3 秒（见 docs/改动记录.md 第四份日志）。收成一个窗口后，
+ * 往上翻页走「查看更早」，往下续读走「查看更新的」，两边各 12 条一批。
+ */
+const MIX_JUMP_WINDOW_TURNS = 12;
+/** 跳转窗口给目标前面留几条，免得落点紧贴视口上沿看不出上下文 */
+const MIX_JUMP_LEAD_TURNS = 2;
 
 function AssistantTurn({ turn, ticketFrames, encoreFrames, filterRules, state, dialogue }: { turn: MixTurn; ticketFrames: TurnFrame[]; encoreFrames: TurnFrame[]; filterRules?: MixFilterRule[]; state?: MixState; dialogue?: MixProseDialogue }) {
     // 展示顺序：状态栏在正文前、小剧场在正文后（与模型的输出顺序一致，无需重排）；
@@ -72,13 +132,14 @@ function AssistantTurn({ turn, ticketFrames, encoreFrames, filterRules, state, d
     );
 }
 
-/** 每条消息下方的操作行：复制 / 回溯到这里 / 编辑 */
+/** 每条消息下方的操作行：复制 / 回溯到这里 / 开新支线 / 编辑 */
 function TurnActions({
     align,
     disabled,
     canRewind,
     onCopy,
     onRewind,
+    onFork,
     onEdit,
 }: {
     align: "left" | "right";
@@ -86,6 +147,7 @@ function TurnActions({
     canRewind: boolean;
     onCopy: () => void;
     onRewind: () => void;
+    onFork: () => void;
     onEdit: () => void;
 }) {
     return (
@@ -94,11 +156,73 @@ function TurnActions({
             {canRewind ? (
                 <button type="button" className="mix-turn-act" onClick={onRewind} disabled={disabled} aria-label="回溯到这里"><History size={13} /></button>
             ) : null}
+            <button type="button" className="mix-turn-act" onClick={onFork} disabled={disabled} aria-label="从此处开新支线" title="从此处开新支线"><GitBranch size={13} /></button>
             <button type="button" className="mix-turn-act" onClick={onEdit} disabled={disabled} aria-label="编辑"><Pencil size={13} /></button>
         </div>
     );
 }
 
+/** 开新支线弹层：从指定轮分叉，收集支线名 + 备注，确认后由调用方建支线并跳转 */
+function MixForkDialog({
+    fromTitle,
+    fromTurnText,
+    roundCount,
+    defaultName,
+    onCancel,
+    onConfirm,
+}: {
+    fromTitle: string;
+    fromTurnText?: string;
+    roundCount: number;
+    defaultName?: string;
+    onCancel: () => void;
+    onConfirm: (opts: { branchName: string; branchNote: string }) => void;
+}) {
+    const [name, setName] = useState(defaultName ?? "");
+    const [note, setNote] = useState("");
+    return (
+        <div className="mix-modal-mask" onClick={onCancel}>
+            <div className="mix-modal mix-fork-dialog" onClick={(e) => e.stopPropagation()}>
+                <div className="mix-modal-head">
+                    <span>从此处开新支线</span>
+                    <button type="button" className="mix-modal-x" onClick={onCancel} aria-label="关闭"><X size={16} /></button>
+                </div>
+                <div className="mix-modal-body">
+                    <p className="mix-fork-from">
+                        从「{fromTitle}」第 {roundCount} 轮之后分叉：新支线复制此前所有进度作为起点，从这一轮往后各自续写，<b>原对局不受影响</b>。
+                    </p>
+                    {fromTurnText ? <p className="mix-fork-summary">分叉点：{fromTurnText}</p> : null}
+                    <label className="mix-field">
+                        <span>支线名</span>
+                        <input
+                            className="mix-input"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            placeholder="如：黑化路线 / 和平结局"
+                            maxLength={24}
+                            autoFocus
+                        />
+                    </label>
+                    <label className="mix-field">
+                        <span>备注</span>
+                        <textarea
+                            className="mix-textarea"
+                            value={note}
+                            onChange={(e) => setNote(e.target.value)}
+                            placeholder="随手记一句这条线在干嘛，方便以后回退 / 回忆"
+                            rows={3}
+                            maxLength={200}
+                        />
+                    </label>
+                </div>
+                <div className="mix-modal-foot">
+                    <button type="button" className="mix-btn" onClick={onCancel}>取消</button>
+                    <button type="button" className="mix-btn mix-btn-primary" onClick={() => onConfirm({ branchName: name, branchNote: note })}>创建支线</button>
+                </div>
+            </div>
+        </div>
+    );
+}
 /**
  * 记住的值：顶栏下的一条横条，点开看全部。
  * 没有任何值时整条不存在——没配小票的对局界面不变。
@@ -132,19 +256,93 @@ function StateBar({ state }: { state: MixState }) {
     );
 }
 
-export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
+export function MixologyGame({ sessionId, onBack, onToast, onSwitchSession }: GameProps) {
     const [session, setSession] = useState<MixSession | null>(() => getMixSession(sessionId));
     const [input, setInput] = useState("");
-    const [busy, setBusy] = useState(false);
     /**
-     * 正在写的那一段。模型每吐一小段就回调一次，一个 token 重渲染一次太浪费，
-     * 所以先攒在 ref 里，按帧合批推给界面。
+     * 这局实际烧的是哪本账 = **快捷切换里选中的那个「全局模型」所属的文件夹**。
+     * 解析交给共享的 lib/mixology/account.ts：它读的就是 binding.globalDefaults.apiConfigId
+     * （角色级绑定不参与对局），全局没设时才退到配置列表第一个 —— 必须与对局实际取配置的口径一致，
+     * 否则「显示的余额」和「真正扣费的账户」会是两本账。
+     * 用户中途换模型也要跟着换账户；baseline 只在「换账户」时重取，以免本局消耗被清零。
      */
-    const [live, setLive] = useState("");
-    const liveRef = useRef("");
-    const liveFrameRef = useRef(0);
-    const busyRef = useRef(false);
+    const [mixAccount, setMixAccount] = useState(() => snapshotMixAccount());
+
+    useEffect(() => {
+        const sync = () => setMixAccount(prev => {
+            const id = resolveMixAccountId();
+            if (id === prev.id) return prev; // 同一本账：保留 baseline，免得「本局消耗」被清零
+            return { id, baseline: getApiAccount(id).balance };
+        });
+        sync();
+        window.addEventListener("settings-bindings-updated", sync);
+        return () => window.removeEventListener("settings-bindings-updated", sync);
+    }, []);
+    const [accountOpen, setAccountOpen] = useState(false);
+    /**
+     * 订阅对局运行时：多对局并行生成不打断，生成状态由 runtime 统一管理。
+     */
+    const runtimeState = useSyncExternalStore(
+        subscribeMixSessionRuntime,
+        getMixSessionRuntimeState,
+        getMixSessionRuntimeState
+    );
+    // 从订阅到的 runtimeState 派生当前对局的生成状态，
+    // 而不是直接调全局 getters——确保渲染时取到的值与触发重渲染的那份快照一致，
+    // 避免「notify 触发了重渲染，但派生值读到了更晚的状态」的时间差问题。
+    const runningEntry = runtimeState.running[sessionId];
+    const busy = runningEntry ? (runningEntry.status === "generating" || runningEntry.status === "queued") : false;
+    const live = runningEntry?.liveText ?? "";
+    const genStatus = runningEntry?.status ?? null;
+    /**
+     * 缓冲发送区：调制期间敲好的后续剧情按局排队（模块级 store，切界面/刷新都不丢），
+     * 出杯后由下面的状态迁移效果逐条自动接话。
+     */
+    const pendingState = useSyncExternalStore(subscribeMixPending, getMixPendingState, getMixPendingState);
+    const pendingQueue = pendingState.queues[sessionId] ?? EMPTY_MIX_PENDING;
+    const pendingPaused = !!pendingState.paused[sessionId];
+    /** 接话函数够不着声明位置（它在早退 return 之后才定义），状态迁移效果经由这个 ref 调它 */
+    const pumpPendingRef = useRef<() => void>(() => {});
+    /**
+     * 当前正在显示的对局 id（ref 版）：生成是异步的，期间用户可能切去别的对局，
+     * 旧闭包里的 commit 靠它判断自己是否已经过期，避免把旧对局数据刷进新界面。
+     */
+    const sessionIdRef = useRef(sessionId);
+    sessionIdRef.current = sessionId;
+    // 本组件无 key 复用，useState 初始化只在首次挂载跑——切对局时手动回读
+    useEffect(() => {
+        setSession(getMixSession(sessionId));
+    }, [sessionId]);
+    /**
+     * 生成结束（生成/排队 → 完成/失败/条目清理）时回读存储刷新界面：
+     * 引擎把新回合写进 localStorage 后不会主动喊组件，session state 不自重读；
+     * 非流式下没有 live 文本兜底，不在这里刷的话界面会一直停在旧内容上。
+     */
+    const prevGenStatus = useRef(genStatus);
+    useEffect(() => {
+        const prev = prevGenStatus.current;
+        prevGenStatus.current = genStatus;
+        const wasActive = prev === "generating" || prev === "queued";
+        const isActive = genStatus === "generating" || genStatus === "queued";
+        if (wasActive && !isActive) setSession(getMixSession(sessionId));
+        // 缓冲发送区自动接话的状态迁移口径：
+        // · 正常出杯（→done）后 runtime 清掉条目（done→null）→ 取队首接话；
+        // · 没走到 done 就结束（生成出错、被取消）→ 自动接话暂停。失败之后再把
+        //   后文往坏掉的现场里灌没有意义，队列原样留着等玩家点「继续发送」。
+        if (wasActive && !isActive && genStatus !== "done") setMixPendingPaused(sessionId, true);
+        if (prev === "done" && genStatus === null) pumpPendingRef.current();
+    }, [genStatus, sessionId]);
+    // 带着队列回到一场此刻没有任何生成的对局：补接一棒。
+    // 生成发生在界面外的话，done→null 那次迁移组件没挂着、捕捉不到，这里兜底；
+    // pumpPending 自己会看 runtime 状态，残留态/暂停/空队列都会原样退回。
+    useEffect(() => {
+        if (!getMixPendingQueue(sessionId).length) return;
+        const t = setTimeout(() => pumpPendingRef.current(), 300);
+        return () => clearTimeout(t);
+    }, [sessionId]);
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+    /** 开新支线弹层状态：记录从哪条消息分叉（turnId + 绝对索引） */
+    const [fork, setFork] = useState<{ turnId: string; idx: number } | null>(null);
     /**
      * 编辑弹层的键盘适配（iOS）：弹层高、输入框更高，键盘一出 WebKit 会滚动整页
      * 去追光标，把弹层标题顶出屏幕（偶发，取决于光标位置与时序）。两手处理：
@@ -200,7 +398,6 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         return () => window.removeEventListener(MIX_CABINET_UPDATED_EVENT, bump);
     }, []);
     const scrollRef = useRef<HTMLDivElement | null>(null);
-    const abortRef = useRef<AbortController | null>(null);
     const wheelRef = useRef<HTMLDivElement | null>(null);
     /**
      * 滚动落点：还没开口的局停在扉页顶上（开场画布要从头看），聊过的局停在最新一条上。
@@ -208,11 +405,34 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
      */
     const stickRef = useRef<"top" | "bottom" | "free">("bottom");
     /**
+     * 新一轮渲染要不要把视口拽到最后一行（三档）：
+     * always = 始终贴底；bottom = 只在你本来就在底部时才跟着走；manual = 完全不动。
+     * 由罗盘偏好驱动，applyStick 读它——放 ref 是为了让它们在同一帧里读到同一份值。
+     */
+    const followRef = useRef<FollowMode>("manual");
+    /**
      * 懒加载：收起的更早轮次数（从头数）。记"收起几条"而不是"露出几条"：
      * 回溯把后面的轮次砍掉时，收起的那些不会因此从顶上冒出来把画面往下推——
      * 用户正停在被回溯的那一轮上，iOS 没有 scroll anchoring，顶上一长就跳走了。
+     *
+     * 初值必须在这里算好，不能留 0 等 layouteffect 去收：
+     * `session.turns.slice(hiddenTurnCount, turns.length - tailHiddenCount)` 是渲染入口，
+     * 头留 0 就是**首帧把整局全渲出来**（实测 415 轮那场首帧渲 415 行、每行还要挂
+     * 沙盒 iframe），下一次 commit 才收到只剩 12 行——那 403 行白渲白拆，正是"进对局卡好几秒"
+     * 里随轮数增长的那一块。开发机同一份真实数据：进那场 415 轮对局的长任务 3863ms（原始）
+     * → 2227ms（先消掉重复 JSON.parse）→ **344ms**（本初值），渲染行数 415 → 12。
+     * 下面 `useLayoutEffect([sessionId])` 里那次 setHiddenTurnCount 与本初值同式，
+     * 数值相同 React 直接跳过重渲染，只保留它负责的另一半（定 stickRef / applyStick）。
      */
-    const [hiddenTurnCount, setHiddenTurnCount] = useState(0);
+    const [hiddenTurnCount, setHiddenTurnCount] = useState(() => Math.max(0, (session?.turns.length ?? 0) - MIX_INITIAL_TURNS));
+    /**
+     * 收起的**更新**轮次数（从尾数）。平时一直是 0（人就停在最新那一截）；
+     * 只有跳旧剧情时才非零——跳过去以后，这一截窗口的下面还压着没渲染的内容，
+     * 底部给一颗「查看更新的」按钮按批放出来。渲染入口是
+     * `session.turns.slice(hiddenTurnCount, turns.length - tailHiddenCount)`，
+     * 两头都有闸门，跳转才不会把「目标到最新」整段铺出来（见 MIX_JUMP_WINDOW_TURNS 的实测数）。
+     */
+    const [tailHiddenCount, setTailHiddenCount] = useState(0);
     /**
      * 展开更早的轮次后，把原来最上面那条钉在屏幕上原来的位置：新插进来的轮次里
      * 小票/小剧场 iframe 是异步报高的，头一两秒内容会连着长高几次，每次报高都按锚点重落一次，
@@ -493,10 +713,20 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
     /** 上一次 scroll 事件时的位置：撒手判定靠它识别滚动方向 */
     const lastTopRef = useRef(0);
 
-    /** 按当前落点滚一次 */
-    const applyStick = useCallback(() => {
+    /** 按当前落点滚一次。force = 进局 / 玩家显式操作，不受跟随档位限制 */
+    const applyStick = useCallback((force = false) => {
         const el = scrollRef.current;
-        if (!el || stickRef.current === "free") return;
+        if (!el) return;
+        const mode = followRef.current;
+        // manual：任何"内容长高了"都不许动视口，你滑到哪就在哪
+        if (!force && mode === "manual") return;
+        if (!force && mode === "bottom") {
+            // bottom：只有你本来就已经停在最新的时候才跟着往下；正在翻旧剧情就撒手
+            const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+            if (gap > 24) return;
+            if (stickRef.current === "free") stickRef.current = "bottom";
+        }
+        if (stickRef.current === "free") return;
         el.scrollTop = stickRef.current === "top" ? 0 : el.scrollHeight;
         lastTopRef.current = el.scrollTop;
     }, []);
@@ -518,10 +748,13 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         loadMoreAnchorRef.current = null;
         const entered = getMixSession(sessionId);
         setHiddenTurnCount(Math.max(0, (entered?.turns.length ?? 0) - MIX_INITIAL_TURNS));
+        // 换一局就是换了个窗口，上一局跳旧剧情留下的"尾部收起"不能带过来
+        setTailHiddenCount(0);
         stickRef.current = (entered?.turns ?? []).some((turn) => turn.role === "user") ? "bottom" : "top";
-        applyStick();
+        // 进局算一次定位，不算"内容长高了"——不受跟随档位影响，否则刚进来就不知道自己在哪儿
+        applyStick(true);
         const timer = window.setTimeout(() => {
-            applyStick();
+            applyStick(true);
             setEntering(false);
         }, 400);
         return () => window.clearTimeout(timer);
@@ -587,6 +820,8 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
      * 轮数变了跟着修正收起数：
      * · 变少（回溯/撤回）：只保证还露着几条，不多露——不然顶上冒出旧轮次把画面推下去；
      * · 变多（新一轮到了）且正贴着底：把顶上多出来的收掉，常驻的 iframe 数量不随长局增长。
+     * 尾部收起（跳旧剧情留下的那一截）同样跟着修正：贴底时一律放开，
+     * 回溯把后面的轮次砍掉时收起到还剩几条，避免出现"整段都被收起、屏幕空白"。
      */
     const turnCount = session?.turns.length ?? 0;
     useLayoutEffect(() => {
@@ -596,7 +831,12 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
             if (stickRef.current === "bottom") return Math.max(hidden, turnCount - MIX_INITIAL_TURNS);
             return hidden;
         });
-    }, [turnCount]);
+        setTailHiddenCount((tail) => {
+            if (stickRef.current === "bottom") return 0;
+            const maxTail = Math.max(0, turnCount - MIX_MIN_VISIBLE_TURNS - hiddenTurnCount);
+            return tail > maxTail ? maxTail : tail;
+        });
+    }, [turnCount, hiddenTurnCount]);
 
     /**
      * 用户自己翻页了就撒手，别在画布撑高时把他拽回去。
@@ -612,6 +852,8 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         if (!el) return;
         const prevTop = lastTopRef.current;
         lastTopRef.current = el.scrollTop;
+        // 手动/贴底模式下积攒的新内容，滑回底部就消掉
+        if (el.scrollHeight - el.scrollTop - el.clientHeight <= 60) setNewCount(0);
         if (stickRef.current === "free") return;
         const gapTop = el.scrollTop;
         const gapBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
@@ -629,7 +871,11 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         else applyStick();
     }, [applyStick]);
 
-    useEffect(() => () => abortRef.current?.abort(), []);
+    // 切换对局时（sessionId 变化），重新加载对局数据
+    useEffect(() => {
+        setSession(getMixSession(sessionId));
+        stickRef.current = "bottom";
+    }, [sessionId]);
 
     // 进对局：还没开口的局用当前角色卡重取开场白。
     // 开场白是建局时写死进 turns[0] 的一条消息，作者改完卡回来本来看不到新的那句；
@@ -716,6 +962,190 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         : null;
 
 
+    // ── 剧情侧轨 / 溯源罗盘 ──
+    /** 偏好：跟随落位档位、面板形态（并入侧栏 / 独立浮窗）、脱水开关与自定义套话词 */
+    const [compassPrefs, setCompassPrefs] = useState<CompassPrefs>(() => readCompassPrefs());
+    followRef.current = compassPrefs.follow;
+    const patchPrefs = useCallback((patch: Partial<CompassPrefs>) => {
+        setCompassPrefs((prev) => {
+            const next = { ...prev, ...patch };
+            writeCompassPrefs(next);
+            return next;
+        });
+    }, []);
+    const [compassOpen, setCompassOpen] = useState(false);
+    /** 侧轨在坞里被再点一次时的临时收起 */
+    const [railHidden, setRailHidden] = useState(false);
+    /** 跳转落地要点亮的那一轮（蓝色呼吸外发光） */
+    const [flashId, setFlashId] = useState<string | null>(null);
+    const flashTimer = useRef(0);
+    /** 目标还在懒加载收起区时，先记着，展开完再跳 */
+    const pendingJumpRef = useRef<string | null>(null);
+    /** 锁定 / 贴底模式下累计的未读条数 */
+    const [newCount, setNewCount] = useState(0);
+    const prevTurnCountRef = useRef(0);
+    const prevBusyRef = useRef(false);
+
+    /** 这一局的轮次清单：成对 + 脱水，只在轮次或脱水设置变化时重算 */
+    const rounds = useMemo(
+        () => pairMixRounds(session?.turns ?? [], compassPrefs.words, !compassPrefs.dewater),
+        [session?.turns, compassPrefs.words, compassPrefs.dewater],
+    );
+
+    /** 受统一控制坞驱动：坞里点「剧情侧轨 / 溯源罗盘」时切换自身显隐 */
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ control?: string }>).detail;
+            if (detail?.control === "mix-story-rail") setRailHidden((v) => !v);
+            else if (detail?.control === "mix-story-compass") setCompassOpen((v) => !v);
+        };
+        window.addEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
+        return () => window.removeEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
+    }, []);
+
+    /**
+     * 锁定 / 贴底时，新内容是不声不响地来的：别让它悄没声漏掉，攒个数字挂在侧轨底部。
+     * 跟随档位下永远不需要这个提示，直接清零。
+     */
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const count = session?.turns.length ?? 0;
+        const prev = prevTurnCountRef.current;
+        prevTurnCountRef.current = count;
+        const busyStarted = busy && !prevBusyRef.current;
+        prevBusyRef.current = busy;
+        if (followRef.current === "always") { setNewCount(0); return; }
+        if (count <= prev && !busyStarted) return;
+        const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (gap > 60) setNewCount((n) => n + Math.max(1, count - prev));
+        else setNewCount(0);
+    }, [session?.turns.length, busy]);
+
+    /** 视觉落点聚光灯：给目标那一轮打一枚 1.6 秒的蓝色呼吸外发光，提示「你找的剧情在这里」 */
+    const flashTurn = useCallback((turnId: string) => {
+        setFlashId(turnId);
+        if (flashTimer.current) window.clearTimeout(flashTimer.current);
+        flashTimer.current = window.setTimeout(() => setFlashId(null), 1600);
+    }, []);
+    useEffect(() => () => { if (flashTimer.current) window.clearTimeout(flashTimer.current); }, []);
+
+    /** 平滑电梯：把某一轮滑到视口顶部 */
+    const scrollToTurn = useCallback((turnId: string) => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const node = el.querySelector<HTMLElement>(`[data-turn-id="${turnId}"]`);
+        if (!node) return;
+        const top = node.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+        // 玩家亲手挪过的：先松开跟底，免得内容一长高就被拽回去。
+        // 「跟随」档是玩家自己选的，那种情况下保留原落点，让它照旧追最新。
+        if (followRef.current !== "always") stickRef.current = "free";
+        el.scrollTo({ top: Math.max(0, top - 10), behavior: "smooth" });
+        flashTurn(turnId);
+    }, [flashTurn]);
+
+    /**
+     * 点罗盘/侧轨上的某一轮：面板先收，再把视口像电梯一样滑到那一轮。
+     *
+     * 目标不在已经渲染出来的这一截里时，**不再从目标一路铺到最新**，而是把窗口整体搬到目标那儿
+     * （目标前留 MIX_JUMP_LEAD_TURNS 条、总共 MIX_JUMP_WINDOW_TURNS 条），
+     * 下面没渲染的那一截记进 tailHiddenCount，由底部的「查看更新的」按批放开。
+     * 以前这里只收头不收尾（setHiddenTurnCount(startIndex - 2) 之后尾巴全放开），
+     * 126 条那一局从第 1 轮跳一下就是 126 行 + 68 个沙盒 iframe。
+     */
+    const jumpToRound = useCallback((round: CompassRound) => {
+        const targetId = compassAnchorId(round);
+        if (!targetId) return;
+        setCompassOpen(false);
+        if (round.startIndex >= hiddenTurnCount && round.startIndex < turnCount - tailHiddenCount) {
+            // 就在渲染出来的这一截里：这是玩家亲手点的移动，不受跟随档位限制
+            window.requestAnimationFrame(() => scrollToTurn(targetId));
+            return;
+        }
+        // 撤离跟底，否则 layouteffect 会立刻把窗口收回去
+        stickRef.current = "free";
+        pendingJumpRef.current = targetId;
+        const windowStart = Math.max(0, round.startIndex - MIX_JUMP_LEAD_TURNS);
+        setHiddenTurnCount(windowStart);
+        setTailHiddenCount(Math.max(0, turnCount - Math.min(turnCount, windowStart + MIX_JUMP_WINDOW_TURNS)));
+    }, [hiddenTurnCount, tailHiddenCount, turnCount, scrollToTurn]);
+
+    /** 往下续读：放开下面那一截被收起的新内容。新内容只长在视口下面，不用钉锚点 */
+    const loadNewerTurns = useCallback(() => {
+        setTailHiddenCount((count) => Math.max(0, count - MIX_LOAD_MORE_TURNS));
+    }, []);
+
+    /** 展开懒加载后，等 DOM 与沙盒高度落定，再把挂着的跳转落下 */
+    useEffect(() => {
+        const targetId = pendingJumpRef.current;
+        if (!targetId) return;
+        const timer = window.setTimeout(() => {
+            pendingJumpRef.current = null;
+            scrollToTurn(targetId);
+        }, 260);
+        return () => window.clearTimeout(timer);
+    }, [hiddenTurnCount, tailHiddenCount, rounds.length, scrollToTurn]);
+
+    /**
+     * 滑回最新。跳旧剧情留下的那一截"尾部收起"要先放开——但**窗口整体搬到末尾**：
+     * 只把 tail 清 0 而不动 head，等于把从旧剧情一直到最新的全部内容一次渲出来
+     * （实测 415 轮那一局这么干会渲 415 行、2034ms 长任务）。
+     * 落点等 DOM 真长出来再钉一次（直接对旧 scrollHeight 平滑滚动会停在半路）。
+     */
+    const toLatestRef = useRef(false);
+    const scrollToLatest = useCallback(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        setNewCount(0);
+        if (tailHiddenCount > 0) {
+            toLatestRef.current = true;
+            stickRef.current = "bottom";
+            setTailHiddenCount(0);
+            setHiddenTurnCount(Math.max(0, turnCount - MIX_INITIAL_TURNS));
+            return;
+        }
+        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }, [tailHiddenCount, turnCount]);
+    useLayoutEffect(() => {
+        if (!toLatestRef.current) return;
+        toLatestRef.current = false;
+        applyStick(true);
+    }, [tailHiddenCount, applyStick]);
+
+    /**
+     * 罗盘里要标出"你正看着第几轮"。面板关着时不必算（那要跟着滚动逐帧刷），
+     * 只在它开着的那段时间里跟一下。
+     */
+    const [activeRoundIndex, setActiveRoundIndex] = useState<number | undefined>(undefined);
+    useEffect(() => {
+        if (!compassOpen) return;
+        const el = scrollRef.current;
+        if (!el) return;
+        const compute = () => {
+            if (!rounds.length) return;
+            const line = el.scrollTop + el.clientHeight * 0.34;
+            const base = el.getBoundingClientRect().top;
+            let picked = rounds[0].startIndex;
+            for (const round of rounds) {
+                const id = compassAnchorId(round);
+                if (!id) continue;
+                const node = el.querySelector<HTMLElement>(`[data-turn-id="${id}"]`);
+                if (!node) continue;
+                const top = node.getBoundingClientRect().top - base + el.scrollTop;
+                if (top <= line) picked = round.startIndex;
+            }
+            setActiveRoundIndex(picked);
+        };
+        let raf = 0;
+        const onScroll = () => { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; compute(); }); };
+        compute();
+        el.addEventListener("scroll", onScroll, { passive: true });
+        return () => {
+            if (raf) cancelAnimationFrame(raf);
+            el.removeEventListener("scroll", onScroll);
+        };
+    }, [compassOpen, rounds, scrollRef]);
+
     if (!session) {
         return (
             <div className="mix-game">
@@ -728,60 +1158,70 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         );
     }
 
-    const run = async (action: (signal: AbortSignal, commit: () => void, onDelta: (chunk: string) => void) => Promise<unknown>) => {
+    const run = (action: (signal: AbortSignal, commit: () => void, onDelta: (chunk: string) => void) => Promise<unknown>) => {
         if (busy) return;
-        const controller = new AbortController();
-        abortRef.current = controller;
-        setBusy(true);
-        busyRef.current = true;
-        liveRef.current = "";
-        setLive("");
-        const commit = () => setSession(getMixSession(sessionId));
-        const onDelta = (chunk: string) => {
-            liveRef.current += chunk;
-            if (liveFrameRef.current) return;
-            liveFrameRef.current = window.requestAnimationFrame(() => {
-                liveFrameRef.current = 0;
-                setLive(liveRef.current);
-            });
+        // 生成是异步的：期间用户可能已切去别的对局（组件复用、sessionId 变了），
+        // 过期的 commit 必须沉默，否则会把旧对局数据刷进正在显示的新对局
+        const commit = () => {
+            if (sessionIdRef.current !== sessionId) return;
+            setSession(getMixSession(sessionId));
         };
-        try {
-            const pending = action(controller.signal, commit, onDelta);
-            // 重说/回溯那几条在第一个 await 之前就落库了，立刻回读让界面先变；
-            // 发送那条的落库晚于这一拍（落杯前钩子是异步的），由引擎回调 commit 补上
-            commit();
-            await pending;
-            commit();
-        } catch (error) {
-            commit();
-            const message = error instanceof Error ? error.message : "生成失败，请重试。";
-            if (!controller.signal.aborted) onToast(message);
-        } finally {
-            if (liveFrameRef.current) {
-                window.cancelAnimationFrame(liveFrameRef.current);
-                liveFrameRef.current = 0;
+        enqueueMixGeneration(sessionId, async (signal, onDelta) => {
+            try {
+                await action(signal, commit, onDelta);
+                // 生成成功后主动刷新一次：确保新回合立刻上屏，
+                // 不依赖 useEffect 检测 genStatus 变化（流式收尾与状态切换之间可能有延迟，
+                // 且极端情况下 useSyncExternalStore 的派生值读取可能落后一拍）。
+                commit();
+            } catch (error) {
+                commit();
+                const message = error instanceof Error ? error.message : "生成失败，请重试。";
+                if (!signal.aborted) onToast(message);
+                throw error; // 重新抛出让 runtime 知道出错了
             }
-            liveRef.current = "";
-            setLive("");
-            busyRef.current = false;
-            setBusy(false);
-        }
+        });
+        // 立即 commit 一次：重说/回溯等操作在第一个 await 之前就落库了
+        commit();
     };
+
+    /**
+     * 缓冲发送区接一棒：队首那条此刻开口。
+     * runtime 里还有任何状态的条目（generating/queued/done/error 残留）都不接 ——
+     * done 残留期 enqueue 会被静默忽略，消息弹出来却没发就走，宁可交给下一次迁移。
+     */
+    const pumpPending = () => {
+        if (getMixSessionGenStatus(sessionId)) return;
+        if (isMixPendingPaused(sessionId)) return;
+        const next = takeMixPending(sessionId);
+        if (!next) return;
+        stickRef.current = "bottom";
+        run((signal, commit, onDelta) => generateMixReply(sessionId, next.text, signal, commit, onDelta));
+    };
+    pumpPendingRef.current = pumpPending;
 
     const handleSend = () => {
         const text = input.trim();
         if (!text) return;
         setInput("");
+        // 调制中不拦笔：这句先进缓冲发送区，出杯后按序自动接话
+        if (busy) {
+            if (!pushMixPending(sessionId, text)) onToast(`缓冲发送区最多排 ${MIX_PENDING_MAX} 条，先处理一批再写。`);
+            return;
+        }
         // 一开口就把落点钉到底：用户那一轮要等落杯前钩子跑完才落库，
         // 这中间界面还是「没人开过口」的样子，不钉住就会被拽回扉页顶上
         stickRef.current = "bottom";
-        void run((signal, commit, onDelta) => generateMixReply(sessionId, text, signal, commit, onDelta));
+        run((signal, commit, onDelta) => generateMixReply(sessionId, text, signal, commit, onDelta));
     };
 
     sayRef.current = (text: string) => {
-        if (busyRef.current) return;
+        // 机括开口和输入框同一套规矩：调制中转进缓冲，出杯后轮到它
+        if (busy) {
+            if (!pushMixPending(sessionId, text)) onToast(`缓冲发送区最多排 ${MIX_PENDING_MAX} 条，先处理一批再写。`);
+            return;
+        }
         stickRef.current = "bottom";
-        void run((signal, commit, onDelta) => generateMixReply(sessionId, text, signal, commit, onDelta));
+        run((signal, commit, onDelta) => generateMixReply(sessionId, text, signal, commit, onDelta));
     };
 
     const copyTurn = (turn: MixTurn) => {
@@ -1042,14 +1482,227 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         "--mix-bg-blur": `${bgTune.blur}px`,
     };
 
+    // —— 字数浮标（特调对局内显示 AI 已生成字数）——
+    // 渲染在 .mix-garnish-scope 作用域之外（.mix-game 的兄弟节点），外观装饰 CSS 作用域够不到，
+    // 不会被隐藏/改色/遮挡。位置/大小/模式都存 localStorage，拖拽缩放后下次还在。
+    const WC_KEY = "mix-wc-ui";
+    const [wcMode, setWcMode] = useState<"total" | "perRound">(() => {
+        try {
+            const raw = localStorage.getItem(WC_KEY);
+            const m = raw ? JSON.parse(raw).mode : null;
+            return m === "perRound" ? "perRound" : "total";
+        } catch {
+            return "total";
+        }
+    });
+    const [wcPos, setWcPos] = useState<{ x: number; y: number } | null>(() => {
+        try {
+            const raw = localStorage.getItem(WC_KEY);
+            const p = raw ? JSON.parse(raw).pos : null;
+            return p && typeof p.x === "number" ? p : null;
+        } catch {
+            return null;
+        }
+    });
+    // 整体缩放系数（含字体）：0.5 ~ 2.5。所有尺寸在 CSS 里用 calc(*var(--wc-scale)) 呈现，
+    // 因此拖动缩放手柄时整个浮标（含字号、内边距、圆角、列表高度）会等比放大缩小。
+    const [wcScale, setWcScale] = useState<number>(() => {
+        try {
+            const raw = localStorage.getItem(WC_KEY);
+            const s = raw ? JSON.parse(raw).scale : null;
+            return typeof s === "number" && s >= 0.5 && s <= 2.5 ? s : 1;
+        } catch {
+            return 1;
+        }
+    });
+    const [wcPop, setWcPop] = useState(false);
+    const wcRef = useRef<HTMLDivElement>(null);
+
+    // 字数浮标 / 剧情侧轨 / 溯源罗盘吃"可使用"这一维：停用 = 界面上彻底不出现；
+    // 只关"常驻显示" = 浮标照常，坞条不再占位，入口收进坞底「更多」。
+    // 这里必须走订阅态而不是 isControlEnabled()，否则开关变化时浮标显隐不会实时刷新
+    const controlDockState = useSyncExternalStore(subscribeControlDockState, getControlDockState, getControlDockState);
+    const wcEnabled = controlDockState.enabled["mix-word-count"] !== false;
+    // 侧轨与罗盘同样只关可用时才消失，不会退回自由悬浮
+    const showRail = controlDockState.enabled["mix-story-rail"] !== false && !railHidden;
+    const compassAllowed = controlDockState.enabled["mix-story-compass"] !== false;
+    const [wcUserHidden, setWcUserHidden] = useState(false);
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent<{ control?: string }>).detail;
+            if (detail?.control !== "mix-word-count") return;
+            setWcUserHidden(prev => !prev);
+        };
+        window.addEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
+        return () => window.removeEventListener(CONTROL_DOCK_ACTIVATE_EVENT, handler);
+    }, []);
+
+    const persistWc = (next: Record<string, unknown>) => {
+        try {
+            const cur = JSON.parse(localStorage.getItem(WC_KEY) || "{}");
+            localStorage.setItem(WC_KEY, JSON.stringify({ ...cur, ...next }));
+        } catch {
+            /* localStorage 不可用时静默忽略 */
+        }
+    };
+
+    const wcAssistant = session.turns.filter((t) => t.role === "assistant");
+    const wcTotal = wcAssistant.reduce((sum, t) => sum + (t.text?.length || 0), 0);
+    const wcRounds = wcAssistant.map((t, i) => ({ round: i + 1, chars: t.text?.length || 0 }));
+    const wcCurrent = wcRounds.length ? wcRounds[wcRounds.length - 1].chars : 0;
+
+    // 本局真实 token 累计（来自大模型 API 返回的 usage；部分中转不回传 usage 时只累计有数据的轮）
+    const tokenTotals = session.turns.reduce((acc, t) => {
+        if (t.role === "assistant" && t.usage) {
+            const p = t.usage.prompt_tokens ?? 0;
+            const c = t.usage.completion_tokens ?? 0;
+            acc.in += p;
+            acc.out += c;
+            acc.total += t.usage.total_tokens ?? (p + c);
+        }
+        return acc;
+    }, { in: 0, out: 0, total: 0 });
+    const tokenHasData = session.turns.some((t) => t.role === "assistant" && t.usage);
+
+    const onWcDragStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+        const el = wcRef.current;
+        if (!el) return;
+        e.preventDefault();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startLeft = el.offsetLeft;
+        const startTop = el.offsetTop;
+        const move = (ev: PointerEvent) => {
+            setWcPos({ x: Math.max(0, startLeft + (ev.clientX - startX)), y: Math.max(0, startTop + (ev.clientY - startY)) });
+        };
+        const up = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            if (el) persistWc({ pos: { x: el.offsetLeft, y: el.offsetTop } });
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+    };
+
+    const onWcResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX;
+        const startScale = wcScale;
+        // 向右拖动放大，向左缩小；每拖动 160px 改变 1.0 倍，限制在 0.5~2.5
+        const toScale = (clientX: number) =>
+            Math.min(2.5, Math.max(0.5, startScale + (clientX - startX) / 160));
+        const move = (ev: PointerEvent) => {
+            setWcScale(toScale(ev.clientX));
+        };
+        const up = (ev: PointerEvent) => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            persistWc({ scale: toScale(ev.clientX) });
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+    };
+
+    const onWcMode = (m: "total" | "perRound") => {
+        setWcMode(m);
+        persistWc({ mode: m });
+        setWcPop(false);
+    };
+
     return (
-        <div className="mix-game mix-garnish-scope" style={stateCssVars}>
+        <>
+            <MixModelBadge />
+            {wcEnabled && !wcUserHidden && (
+            <div
+                className="mix-word-count-badge"
+                id="mix-word-count-badge"
+                ref={wcRef}
+                style={{
+                    ...(wcPos ? { left: wcPos.x, top: wcPos.y, right: "auto", bottom: "auto" } : {}),
+                    "--wc-scale": wcScale,
+                } as CSSProperties}
+            >
+                <div className="mix-wc-head" onPointerDown={onWcDragStart}>
+                    <span className="mix-wc-title">字数统计</span>
+                    <button
+                        type="button"
+                        className="mix-wc-gear"
+                        aria-label="显示设置"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={() => setWcPop((v) => !v)}
+                    >
+                        ⚙
+                    </button>
+                </div>
+                <div className="mix-wc-body">
+                    {wcMode === "total" ? (
+                        <>
+                            <div className="mix-wc-line mix-wc-total">
+                                <span>已生成</span>
+                                <span>{wcTotal.toLocaleString()} 字</span>
+                            </div>
+                            <div className="mix-wc-line">
+                                <span>本轮</span>
+                                <span>{wcCurrent.toLocaleString()} 字</span>
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            <div className="mix-wc-line mix-wc-total">
+                                <span>总计</span>
+                                <span>{wcTotal.toLocaleString()} 字</span>
+                            </div>
+                            <ul className="mix-wc-list">
+                                {wcRounds.length === 0 ? (
+                                    <li>
+                                        <span>暂无生成</span>
+                                        <span>0 字</span>
+                                    </li>
+                                ) : (
+                                    wcRounds.map((r) => (
+                                        <li key={r.round}>
+                                            <span>第{r.round}轮</span>
+                                            <span>{r.chars.toLocaleString()} 字</span>
+                                        </li>
+                                    ))
+                                )}
+                            </ul>
+                        </>
+                    )}
+                </div>
+                {wcPop ? (
+                    <div className="mix-wc-pop">
+                        <label>
+                            <input type="radio" name="wcmode" checked={wcMode === "total"} onChange={() => onWcMode("total")} />
+                            总生成字数
+                        </label>
+                        <label>
+                            <input type="radio" name="wcmode" checked={wcMode === "perRound"} onChange={() => onWcMode("perRound")} />
+                            每轮对话生成
+                        </label>
+                    </div>
+                ) : null}
+                <div className="mix-wc-resize" onPointerDown={onWcResizeStart} />
+            </div>
+            )}
+            <div className="mix-game mix-garnish-scope" style={stateCssVars}>
             {/* 装饰是可分享材料里唯一直接进主文档的代码，注入前先收口到本画面 */}
             {assets.garnishCss ? <style>{scopeMixCss(assets.garnishCss)}</style> : null}
             <div className="mix-game-bg" style={bgStyle} />
             <div className="mix-game-header">
                 <button type="button" className="mix-icon-btn" onClick={onBack} aria-label="返回"><ChevronLeft size={20} /></button>
-                <div className="mix-game-title">{session.charName}</div>
+                <div className="mix-game-title">{session.name?.trim() || session.charName}</div>
+                <MixBalanceChip
+                    className="mix-game-token"
+                    accountId={mixAccount.id || undefined}
+                    baseline={mixAccount.baseline}
+                    extra={tokenHasData ? `tk ${tokenTotals.in}/${tokenTotals.out}` : undefined}
+                    onClick={() => setAccountOpen(true)}
+                    title={tokenHasData
+                        ? `本局 token 进 ${tokenTotals.in} · 出 ${tokenTotals.out}；点开看余额明细`
+                        : "点开看余额明细"}
+                />
                 {slotGroups.header.map(({ material, layout }) => (
                     <button
                         key={material.id}
@@ -1123,6 +1776,8 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                     ))}
                 </div>
             ) : null}
+            {/* 滚动区 + 剧情侧轨 + 溯源罗盘：侧轨要贴着滚动区定位，所以另起一层相对定位的壳 */}
+            <div className="mix-game-body" data-rail={showRail ? "true" : undefined}>
             <div
                 className="mix-game-scroll"
                 ref={scrollRef}
@@ -1162,7 +1817,7 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         查看更早的 {Math.min(MIX_LOAD_MORE_TURNS, hiddenTurnCount)} 条 · 还有 {hiddenTurnCount} 条
                     </button>
                 ) : null}
-                {session.turns.slice(hiddenTurnCount).map((turn, offset) => {
+                {session.turns.slice(hiddenTurnCount, session.turns.length - tailHiddenCount).map((turn, offset) => {
                     const idx = hiddenTurnCount + offset;
                     const isLast = idx === session.turns.length - 1;
                     const actions = (
@@ -1172,18 +1827,24 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             canRewind={!isLast}
                             onCopy={() => copyTurn(turn)}
                             onRewind={() => setConfirm({ type: "rewind", turnId: turn.id })}
+                            onFork={() => setFork({ turnId: turn.id, idx })}
                             onEdit={() => setEditing({ id: turn.id, draft: mixTurnRawText(turn) })}
                             key={`act-${turn.id}`}
                         />
                     );
                     return turn.role === "user" ? (
-                        <div className="mix-user-turn" data-with-actions="true" data-turn-id={turn.id} key={turn.id}>
+                        <div className="mix-user-turn" data-with-actions="true" data-turn-id={turn.id} data-flash={flashId === turn.id ? "true" : undefined} key={turn.id}>
                             <div className="mix-user-bubble">{turn.text}</div>
                             {actions}
                         </div>
                     ) : (
-                        <div className="mix-assistant-turn" key={turn.id} data-turn={turn.id} data-turn-id={turn.id}>
+                        <div className="mix-assistant-turn" key={turn.id} data-turn={turn.id} data-turn-id={turn.id} data-flash={flashId === turn.id ? "true" : undefined}>
                             <AssistantTurn turn={turn} ticketFrames={turnTicketFrames(turn)} encoreFrames={turnEncoreFrames(turn)} filterRules={assets.filterRules} state={turn.state} dialogue={dialogueFor(turn.id)} />
+                            {turn.usage ? (
+                                <div className="mix-turn-token" title="本轮真实 token 用量（来自大模型 API 返回的 usage）：进=上下文输入，出=本轮回覆">
+                                    进 {turn.usage.prompt_tokens ?? "?"} · 出 {turn.usage.completion_tokens ?? "?"}{turn.usage.total_tokens ? ` · 共 ${turn.usage.total_tokens}` : ""}
+                                </div>
+                            ) : null}
                             {/* 信任模式机括的坑位：prose 拿这一轮的正文容器本身，turn 在正文下方给一块 */}
                             {trustedBase ? trustedMechanisms.map((material) => {
                                 const shownText = applyMixFilterRules(turn.text, assets.filterRules, "display");
@@ -1200,6 +1861,11 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         </div>
                     );
                 })}
+                {tailHiddenCount > 0 ? (
+                    <button type="button" className="mix-load-more" onClick={loadNewerTurns}>
+                        查看更新的 {Math.min(MIX_LOAD_MORE_TURNS, tailHiddenCount)} 条 · 还有 {tailHiddenCount} 条
+                    </button>
+                ) : null}
                 {busy ? (() => {
                     // 流式过程中同样过一遍「仅显示」滤网，写出来的样子和落库后一致
                     const shown = applyMixFilterRules(mixStreamText(live), assets.filterRules, "display");
@@ -1240,6 +1906,39 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         <MixRichText text={item.html} />
                     </div>
                 ))}
+            </div>
+            {showRail ? (
+                <MixStoryRail
+                    scrollRef={scrollRef}
+                    rounds={rounds}
+                    measureKey={`${sessionId}|${turnCount}|${hiddenTurnCount}|${tailHiddenCount}|${busy}|${rounds.length}`}
+                    hiddenCount={hiddenTurnCount}
+                    newCount={newCount}
+                    onOpenCompass={() => setCompassOpen((v) => !v)}
+                    onJumpRound={jumpToRound}
+                    onLoadMore={loadMoreTurns}
+                    onToLatest={scrollToLatest}
+                />
+            ) : null}
+            {compassAllowed && compassOpen ? (
+                <MixStoryCompass
+                    rounds={rounds}
+                    open
+                    mode={compassPrefs.mode}
+                    follow={compassPrefs.follow}
+                    dewater={compassPrefs.dewater}
+                    words={compassPrefs.words}
+                    activeIndex={activeRoundIndex}
+                    busy={busy}
+                    charName={session.charName}
+                    onClose={() => setCompassOpen(false)}
+                    onMode={(mode) => patchPrefs({ mode })}
+                    onFollow={(follow) => { followRef.current = follow; patchPrefs({ follow }); }}
+                    onDewater={(dewater) => patchPrefs({ dewater })}
+                    onWords={(words) => patchPrefs({ words })}
+                    onJump={jumpToRound}
+                />
+            ) : null}
             </div>
             {/* 无界面的机括：沙盒照常挂着、照常收对白事件，只是什么都不画 */}
             {slotGroups.hidden.length ? (
@@ -1315,6 +2014,58 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                     ))}
                 </div>
             ) : null}
+            {/* 缓冲发送区：调制中写好的后续剧情在这里排队，出杯一条接一条 */}
+            {pendingQueue.length ? (
+                <div className="mix-pending-bar">
+                    <div className="mix-pending-head">
+                        <span className="mix-pending-title">缓冲发送区 · {pendingQueue.length} 条</span>
+                        <span className="mix-pending-hint">
+                            {pendingPaused
+                                ? "上一拍生成未正常完成，自动接话已暂停"
+                                : busy
+                                    ? "出杯后逐条自动发送"
+                                    : "待发"}
+                        </span>
+                        <span className="mix-pending-ops">
+                            {!busy ? (
+                                <button type="button" className="mix-pending-btn" onClick={() => { setMixPendingPaused(sessionId, false); pumpPending(); }}>
+                                    {pendingPaused ? "继续发送" : "立即发送"}
+                                </button>
+                            ) : null}
+                            <button type="button" className="mix-pending-btn" onClick={() => clearMixPending(sessionId)}>清空</button>
+                        </span>
+                    </div>
+                    <div className="mix-pending-list">
+                        {pendingQueue.map((item, i) => (
+                            <div className="mix-pending-item" key={item.id}>
+                                <span className="mix-pending-idx">{i + 1}</span>
+                                <span className="mix-pending-text">{item.text}</span>
+                                <button
+                                    type="button"
+                                    className="mix-icon-btn mix-pending-act"
+                                    aria-label="取回编辑"
+                                    title="取回编辑"
+                                    onClick={() => {
+                                        removeMixPending(sessionId, item.id);
+                                        setInput((prev) => (prev ? `${prev}\n${item.text}` : item.text));
+                                    }}
+                                >
+                                    <Pencil size={13} />
+                                </button>
+                                <button
+                                    type="button"
+                                    className="mix-icon-btn mix-pending-act"
+                                    aria-label="删除这条"
+                                    title="删除这条"
+                                    onClick={() => removeMixPending(sessionId, item.id)}
+                                >
+                                    <X size={13} />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
             <div className="mix-game-inputbar">
                 {slotGroups["inputbar-left"].map(({ material, layout }) => (
                     <button
@@ -1350,8 +2101,9 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                             handleSend();
                         }
                     }}
-                    placeholder={busy ? "调制中…" : "说点什么…"}
-                    disabled={busy}
+                    placeholder={busy
+                        ? (pendingQueue.length ? `调制中…已排 ${pendingQueue.length} 条，继续写接着排` : "调制中…现在写的会进缓冲发送区")
+                        : "说点什么…"}
                 />
                 <button
                     type="button"
@@ -1376,7 +2128,7 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         {layout.icon || "◈"}
                     </button>
                 ))}
-                <button type="button" className="mix-send-btn" onClick={handleSend} disabled={busy || !input.trim()} aria-label="发送">
+                <button type="button" className="mix-send-btn" onClick={handleSend} disabled={!input.trim()} aria-label={busy ? "加入缓冲发送区" : "发送"}>
                     <Send size={16} />
                 </button>
             </div>
@@ -1415,6 +2167,21 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                                         对历史重跑滤网
                                     </button>
                                 ) : null}
+                                <button
+                                    type="button"
+                                    className="mix-dock-chip"
+                                    data-on={compassPrefs.follow !== "manual" ? "true" : undefined}
+                                    title={`新一轮渲染完成后要不要把视口挪到最后一行。当前：${FOLLOW_MODE_LABELS[compassPrefs.follow]}（${FOLLOW_MODE_HINTS[compassPrefs.follow]}）点一下在三档之间切换。`}
+                                    onClick={() => {
+                                        const order: FollowMode[] = ["manual", "bottom", "always"];
+                                        const next = order[(order.indexOf(compassPrefs.follow) + 1) % order.length];
+                                        followRef.current = next;
+                                        patchPrefs({ follow: next });
+                                        onToast(`落位已切换为「${FOLLOW_MODE_LABELS[next]}」：${FOLLOW_MODE_HINTS[next]}`);
+                                    }}
+                                >
+                                    落位：{FOLLOW_MODE_LABELS[compassPrefs.follow]}
+                                </button>
                             </div>
                             {histOpen ? (
                                 <div className="mix-histlimit">
@@ -1694,6 +2461,50 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                 />
             ) : null}
 
+            {fork && session ? (() => {
+                const forkTurn = session.turns[fork.idx];
+                const turnText = forkTurn?.text?.replace(/\s+/g, " ").trim().slice(0, 60) ?? "";
+                return (
+                    <MixForkDialog
+                        fromTitle={mixSessionTitle(session)}
+                        fromTurnText={turnText || undefined}
+                        roundCount={mixRoundCount(session.turns.slice(0, fork.idx + 1))}
+                        defaultName={session.branchName}
+                        onCancel={() => setFork(null)}
+                        onConfirm={({ branchName, branchNote }) => {
+                            try {
+                                const child = forkMixSession(sessionId, fork.idx, { branchName, branchNote });
+                                setFork(null);
+                                onToast(`已开新支线「${mixSessionTitle(child)}」。当前对局不变，可在 🌳 世界树里点开继续玩。`);
+                            } catch (error) {
+                                setFork(null);
+                                onToast(error instanceof Error ? error.message : "分叉失败");
+                            }
+                        }}
+                    />
+                );
+            })() : null}
+
+            {onSwitchSession ? (
+                <>
+                    <MixSessionSwitcher sessionId={sessionId} onSwitch={onSwitchSession} />
+                    <MixSessionTree sessionId={sessionId} onSwitch={onSwitchSession} onToast={onToast} />
+                </>
+            ) : null}
+
+            {accountOpen ? (
+                <div className="mix-account-overlay" onClick={() => setAccountOpen(false)}>
+                    <div className="mix-account-sheet" onClick={(event) => event.stopPropagation()}>
+                        <ApiAccountPanel
+                            accountId={mixAccount.id}
+                            onClose={() => setAccountOpen(false)}
+                            title={accountLabel(mixAccount.id)}
+                        />
+                    </div>
+                </div>
+            ) : null}
+
         </div>
+        </>
     );
 }

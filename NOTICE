@@ -51,3 +51,9 @@ Bundled artwork:
   （玻璃图标来自 Nucleo，按其授权中"开源项目 ≤100 个图标并附版权声明"的条款使用，
   颜色按本应用配色做了调整；这些文件不随本项目 AGPL 授权，禁止单独提取或作为
   图标库再分发。）
+
+Fourth-edition integration (2026-10-20):
+- Base: jianchu-in/momo.float.phone, main, e455340c2e02c0dc702d2f221e46fa4c8f158989.
+- Integrated: fallen0930/ai-virtual-phone, dev, a7858a76e41b94bfb628a95484cbfa093295306d.
+- Shared upstream snapshot used for three-way reconciliation: fc65539.
+Original license and third-party asset notices are preserved.
