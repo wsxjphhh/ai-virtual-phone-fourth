@@ -81,33 +81,94 @@ function isViewportLandscape(): boolean {
   return window.innerWidth > window.innerHeight;
 }
 
-/** 进全屏后把方向锁回竖屏。全屏态才允许 lock，所以只能在 requestFullscreen 成功后调；
- *  iOS Safari 与老内核没有 screen.orientation.lock，catch 掉即可，不影响全屏本身。 */
-function lockPortraitIfSupported(): void {
-  if (typeof screen === "undefined") return;
+/** 方向锁在本机的可信程度。一次会话里只实测一次，结果决定后面还赌不赌全屏：
+ *  - unknown：还没试过
+ *  - locked：lock("portrait") 真的应答了
+ *  - unsupported：没有该 API 或被拒——这台设备用全屏换不来竖屏，别再请求 */
+export type PortraitLockState = "unknown" | "locked" | "unsupported";
+let portraitLockState: PortraitLockState = "unknown";
+let landscapeWatchdogBound = false;
+
+export function getPortraitLockState(): PortraitLockState {
+  return portraitLockState;
+}
+
+/** 尝试把方向锁回竖屏，**把结果如实返回**。
+ *  全屏态才允许 lock，所以只能在 requestFullscreen 成功后调。
+ *  这里刻意不吞失败：2026-10-20 的真机日志（PKS110 / Android 16，`fullscreen:"html"`
+ *  + `orientType:"landscape-primary"` + `screen 804x360`）显示，旧写法用
+ *  `.catch(() => {})` 把"锁不上"静默吃掉，页面已经脱离了浏览器地址栏这道保护，
+ *  又没能锁住方向，于是壳在全屏态跟着传感器转横（系统自动旋转关着也照样转），
+ *  390 竖屏稿被压进 360 高——"打开就躺倒、只看得见一小截"就是这么来的。 */
+async function tryLockPortrait(): Promise<boolean> {
+  if (typeof screen === "undefined") return false;
   const orientation = screen.orientation as
     (ScreenOrientation & { lock?: (value: string) => Promise<void> }) | undefined;
-  if (!orientation?.lock) return;
+  if (!orientation?.lock) return false;
   try {
-    orientation.lock("portrait").catch(() => { });
+    await orientation.lock("portrait");
+    return true;
   } catch {
-    /* 部分浏览器在非用户手势里调用会直接 throw，忽略 */
+    /* iOS Safari 无此 API、老内核在非手势调用里直接 throw、部分壳直接 reject */
+    return false;
   }
 }
 
-/** 沉浸全屏请求：偏好关闭、已在全屏、或视口本来就是横向的（说明方向不归我们管，
- *  再请求只会把画面推进全屏横屏这种没法用的状态）都跳过。 */
+async function exitFullscreenQuietly(): Promise<void> {
+  if (typeof document === "undefined") return;
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+  } catch {
+    /* 已经不在全屏，或这个壳不让退 */
+  }
+}
+
+/** 借一次用户手势确认"全屏 + 竖屏"能不能同时成立：能就留全屏，不能就退回浏览器态。
+ *  调用点都在 click 里，requestFullscreen / orientation.lock 需要的用户激活是够的。 */
+async function securePortraitInsideFullscreen(): Promise<void> {
+  const locked = await tryLockPortrait();
+  portraitLockState = locked ? "locked" : "unsupported";
+  if (!locked) await exitFullscreenQuietly();
+}
+
+/** 全屏态下视口转横的兜底：连 screen.orientation.lock 报成功却仍然转横的壳
+ *  （"接受但不生效"那一种），也不能让她停在没法用的画面里。退出全屏后壳一般会转回竖屏。
+ *  退一次就把状态判死，免得下一次点击又请求全屏→又转横→又退，来回抖。 */
+function bindLandscapeWatchdog(): void {
+  if (typeof window === "undefined" || landscapeWatchdogBound) return;
+  landscapeWatchdogBound = true;
+  const onMaybeLandscape = () => {
+    if (portraitLockState === "unsupported") return;
+    if (!document.fullscreenElement || !isViewportLandscape()) return;
+    portraitLockState = "unsupported";
+    void exitFullscreenQuietly();
+  };
+  window.addEventListener("orientationchange", onMaybeLandscape);
+  window.addEventListener("resize", onMaybeLandscape);
+}
+
+/** 沉浸全屏请求：偏好关闭、本机已证明锁不住竖屏、或视口本来就是横向的都不请求；
+ *  已经在全屏里则用来补锁（上一次进入时可能还没走到这一步）。 */
 export function requestMobileImmersiveFullscreen(): void {
   if (typeof document === "undefined") return;
+  bindLandscapeWatchdog();
   if (!shouldRequestPwaFullscreen()) return;
+  if (portraitLockState === "unsupported") return;
+  if (isViewportLandscape()) {
+    // 僵局的入口：进来就已经是横屏全屏（旧版本留下的状态），用这次手势把它拉回竖屏。
+    if (document.fullscreenElement) void securePortraitInsideFullscreen();
+    return;
+  }
   if (document.fullscreenElement) return;
-  if (isViewportLandscape()) return;
   const doc = document.documentElement;
   const request = doc.requestFullscreen?.();
   if (request && typeof request.then === "function") {
-    request.then(lockPortraitIfSupported).catch(() => { });
+    request.then(() => void securePortraitInsideFullscreen()).catch(() => {
+      /* 全屏请求本身被拒：保持浏览器 UI，竖屏照常可用 */
+    });
   } else {
-    lockPortraitIfSupported();
+    // 老内核不返回 Promise，无法确认结果；仍尝试一次锁，锁不上就退回浏览器态。
+    void securePortraitInsideFullscreen();
   }
 }
 
