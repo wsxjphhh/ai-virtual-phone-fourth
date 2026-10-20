@@ -105,7 +105,7 @@ import {
   readThemeProfile,
   writeThemeProfile
 } from "@/lib/theme-storage";
-import { THEME_PACKAGE_INSTALLED_EVENT } from "@/lib/theme-package";
+import { THEME_PACKAGE_INSTALLED_EVENT, THEME_PACKAGE_PREVIEW_REQUESTED_EVENT, commitThemePackagePreview, type ThemePackagePreview } from "@/lib/theme-package";
 import {
   DEFAULT_THEME_PROFILE,
   DEFAULT_FONT_FAMILY,
@@ -1151,6 +1151,18 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   );
   const [savedTheme, setSavedTheme] = useState<ThemeProfile>(() => initialThemeProfile ?? readInitialThemeProfile());
   const [draftTheme, setDraftTheme] = useState<ThemeProfile>(() => initialThemeProfile ?? readInitialThemeProfile());
+  // ── 美化包预览：内存态覆盖桌面，确认「应用」前不写任何存储 ──
+  const [themePreview, setThemePreview] = useState<ThemePackagePreview | null>(null);
+  const [themePreviewBusy, setThemePreviewBusy] = useState(false);
+  const previewSnapshotRef = useRef<{
+    draftTheme: ThemeProfile;
+    savedTheme: ThemeProfile;
+    layout: DesktopLayout;
+    widgets: WidgetInstance[];
+    dock: DesktopIconId[];
+    folders: DesktopFolderMap;
+    themeAssets: Record<string, string>;
+  } | null>(null);
   useEffect(() => {
     activeAppRef.current = activeApp;
   }, [activeApp]);
@@ -1620,8 +1632,18 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       handleThemeDesktopChangeRef.current?.({ widgets: detail.widgets, iconLayout: detail.iconLayout, dock: detail.dock, folders: detail.folders });
       void applyThemeRef.current?.(detail.themeProfile);
     };
+    // 预览请求：资源集市/外观页导入 zip 后先进内存预览，确认才落盘
+    const onThemePreview = (e: Event) => {
+      const preview = (e as CustomEvent).detail as ThemePackagePreview | undefined;
+      if (!preview?.themeProfile || !preview.desktop) return;
+      enterThemePreviewRef.current?.(preview);
+    };
     window.addEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
-    return () => window.removeEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
+    window.addEventListener(THEME_PACKAGE_PREVIEW_REQUESTED_EVENT, onThemePreview);
+    return () => {
+      window.removeEventListener(THEME_PACKAGE_INSTALLED_EVENT, onThemePackage);
+      window.removeEventListener(THEME_PACKAGE_PREVIEW_REQUESTED_EVENT, onThemePreview);
+    };
   }, []);
 
   useEffect(() => {
@@ -3577,7 +3599,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     setCurrentPageIndex((index) => Math.min(index, Math.max(0, trimmedPageCount - 1)));
   }
 
-  function handleThemeDesktopChange(next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[]; folders?: DesktopFolderMap }): void {
+  type ThemeDesktopReplacement = { dock: DesktopIconId[]; folders: DesktopFolderMap; widgets: WidgetInstance[]; layout: DesktopLayout };
+
+  /** 纯计算：把一份外来桌面（导入/预览）与本机现状对账，产出替换方案。不做任何 setState/写盘。 */
+  function buildThemeDesktopReplacement(next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[]; folders?: DesktopFolderMap }): ThemeDesktopReplacement {
     const normalizedWidgets = sanitizeWidgetsForLayout(next.iconLayout, next.widgets);
     // 对账快照：用户此刻拥有的全部图标（页面 ∪ dock ∪ 文件夹成员）。
     // 导入/恢复默认是整桌替换，替换完谁没了着落就补回页面——
@@ -3610,20 +3635,124 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       if (!(id in ICONS) && !customIconIds.has(id)) continue;
       placeIconOnAvailablePage(sane.layout, normalizedWidgets, { id, row: 1, col: 1 }, 1);
     }
-    dockRef.current = nextDock;
-    setDock(nextDock);
-    writeDockLayout(nextDock);
-    setFolders(sane.folders);
-    writeDesktopFolders(sane.folders);
+    return { dock: nextDock, folders: sane.folders, widgets: normalizedWidgets, layout: sane.layout };
+  }
+
+  /** 立即落地版：算出替换方案，set 状态并写盘（外观页恢复默认等直改路径用）。 */
+  function handleThemeDesktopChange(next: { widgets: WidgetInstance[]; iconLayout: DesktopLayout; dock?: DesktopIconId[]; folders?: DesktopFolderMap }): void {
+    const replacement = buildThemeDesktopReplacement(next);
+    dockRef.current = replacement.dock;
+    setDock(replacement.dock);
+    writeDockLayout(replacement.dock);
+    foldersRef.current = replacement.folders;
+    setFolders(replacement.folders);
+    writeDesktopFolders(replacement.folders);
     setOpenFolderId(null);
-    setWidgets(normalizedWidgets);
-    setLayout(sane.layout);
-    saveWidgets(normalizedWidgets);
-    kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(sane.layout));
+    widgetsRef.current = replacement.widgets;
+    setWidgets(replacement.widgets);
+    layoutRef.current = replacement.layout;
+    setLayout(replacement.layout);
+    saveWidgets(replacement.widgets);
+    kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(replacement.layout));
+  }
+
+  const enterThemePreviewRef = useRef<((preview: ThemePackagePreview) => void) | null>(null);
+
+  /** 进入预览：快照现状 → 用包内容覆盖 React 状态，全程零写盘。重复预览保留第一份快照（还原回到最初）。 */
+  function enterThemePreview(preview: ThemePackagePreview): void {
+    if (!previewSnapshotRef.current) {
+      previewSnapshotRef.current = {
+        draftTheme,
+        savedTheme,
+        layout: layoutRef.current,
+        widgets: widgetsRef.current,
+        dock: dockRef.current,
+        folders: foldersRef.current,
+        themeAssets: { ...themeAssets },
+      };
+    }
+    if (preview.assets.length > 0) {
+      setThemeAssets((previous) => {
+        const map = { ...previous };
+        for (const asset of preview.assets) map[asset.id] = asset.dataUrl;
+        return map;
+      });
+    }
+    setDraftTheme(preview.themeProfile);
+    // css-pack 只换 CSS，桌面保持原样；标准包连布局一起覆盖
+    if (preview.kind === "package") {
+      const replacement = buildThemeDesktopReplacement({
+        widgets: preview.desktop.widgets,
+        iconLayout: preview.desktop.iconLayout,
+        dock: preview.desktop.dock,
+        folders: preview.desktop.folders,
+      });
+      dockRef.current = replacement.dock;
+      setDock(replacement.dock);
+      foldersRef.current = replacement.folders;
+      setFolders(replacement.folders);
+      widgetsRef.current = replacement.widgets;
+      setWidgets(replacement.widgets);
+      layoutRef.current = replacement.layout;
+      setLayout(replacement.layout);
+      setOpenFolderId(null);
+      const pageCount = getDesktopPageKeysForState(replacement.layout, replacement.widgets).length;
+      setCurrentPageIndex((index) => Math.min(index, Math.max(0, pageCount - 1)));
+    }
+    setThemePreview(preview);
+  }
+
+  /** 应用：把屏幕上前置的这套外观整体落盘（预览后用户若又微调，以当前显示为准）。 */
+  async function commitThemePreview(): Promise<void> {
+    if (!themePreview || themePreviewBusy) return;
+    setThemePreviewBusy(true);
+    try {
+      await commitThemePackagePreview(themePreview);
+      writeDockLayout(dockRef.current);
+      writeDesktopFolders(foldersRef.current);
+      saveWidgets(widgetsRef.current);
+      kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(layoutRef.current));
+      await applyTheme(draftTheme);
+      setNotice(`已应用美化包《${themePreview.name}》：${themePreview.summary.assetCount} 个资源，${themePreview.summary.widgetCount} 个桌面组件。`);
+      previewSnapshotRef.current = null;
+      setThemePreview(null);
+    } catch (error) {
+      console.error(error);
+      setNotice(error instanceof Error ? error.message : "美化包应用失败");
+    } finally {
+      setThemePreviewBusy(false);
+    }
+  }
+
+  /** 还原：回到预览开始前的状态；顺带把预览期间可能被编辑流程写盘的桌面拉回快照。 */
+  function cancelThemePreview(): void {
+    const snapshot = previewSnapshotRef.current;
+    if (snapshot) {
+      setDraftTheme(snapshot.draftTheme);
+      setSavedTheme(snapshot.savedTheme);
+      setThemeAssets(snapshot.themeAssets);
+      dockRef.current = snapshot.dock;
+      setDock(snapshot.dock);
+      foldersRef.current = snapshot.folders;
+      setFolders(snapshot.folders);
+      widgetsRef.current = snapshot.widgets;
+      setWidgets(snapshot.widgets);
+      layoutRef.current = snapshot.layout;
+      setLayout(snapshot.layout);
+      writeDockLayout(snapshot.dock);
+      writeDesktopFolders(snapshot.folders);
+      saveWidgets(snapshot.widgets);
+      kvSet(ICON_LAYOUT_STORAGE_KEY, JSON.stringify(snapshot.layout));
+      setOpenFolderId(null);
+    }
+    previewSnapshotRef.current = null;
+    setThemePreview(null);
+    setNotice("已还原到预览前的外观");
   }
 
   handleThemeDesktopChangeRef.current = handleThemeDesktopChange;
   applyThemeRef.current = applyTheme;
+  enterThemePreviewRef.current = enterThemePreview;
 
   function handleWidgetConfigChange(widgetId: string, config: Record<string, unknown>): void {
     setWidgets((prev) => {
@@ -4181,6 +4310,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
           widgets={widgets}
           onWidgetsChange={handleWidgetsChange}
           onDesktopThemeChange={handleThemeDesktopChange}
+          onThemePreviewRequest={(preview) => { enterThemePreview(preview); setActiveApp(null); }}
+          themePreviewActive={themePreview !== null}
           pageIcons={layout}
           iconSkins={iconSkinUrls}
           wallpaperStyle={wallpaperStyle}
@@ -5126,6 +5257,40 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     );
                   })}
                   </div>
+                </div>
+              )}
+              {/* 美化包预览确认条：只在桌面可见（打开 App 时预览状态原样保留，回到桌面继续确认） */}
+              {!activeApp && themePreview && (
+                <div
+                  className="absolute bottom-0 left-0 right-0 z-[9998] bg-white/92 backdrop-blur-xl border-t border-gray-200/60 shadow-[0_-8px_28px_rgba(0,0,0,0.12)] rounded-t-[22px] px-4 py-3 flex items-center gap-3 text-black"
+                  onPointerDown={e => e.stopPropagation()}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[calc(13px*var(--app-text-scale,1))] font-medium truncate">
+                      正在预览《{themePreview.name}》
+                    </div>
+                    <div className="text-[calc(11px*var(--app-text-scale,1))] text-gray-500 truncate">
+                      {themePreview.kind === "css-pack"
+                        ? `纯 CSS 美化包 · 已合并 ${(themePreview.mergedCssBytes / 1024).toFixed(0)}KB 样式`
+                        : `${themePreview.summary.assetCount} 个资源 · ${themePreview.summary.widgetCount} 个组件 · ${themePreview.summary.iconCount} 个图标${themePreview.mergedCssBytes > 0 ? ` · 含 ${(themePreview.mergedCssBytes / 1024).toFixed(0)}KB CSS` : ""}`}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="shrink-0 px-4 py-2 rounded-full bg-gray-800 text-white text-[calc(13px*var(--app-text-scale,1))] font-medium active:scale-95 disabled:opacity-40"
+                    onClick={() => { void commitThemePreview(); }}
+                    disabled={themePreviewBusy}
+                  >
+                    应用
+                  </button>
+                  <button
+                    type="button"
+                    className="shrink-0 px-4 py-2 rounded-full bg-gray-100 text-gray-700 text-[calc(13px*var(--app-text-scale,1))] font-medium active:scale-95 disabled:opacity-40"
+                    onClick={cancelThemePreview}
+                    disabled={themePreviewBusy}
+                  >
+                    还原
+                  </button>
                 </div>
               )}
               {showDesktopCustomizer && (

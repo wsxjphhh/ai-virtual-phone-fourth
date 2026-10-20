@@ -55,8 +55,9 @@ import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DIYWidgetEditor } from "@/components/widgets/diy-widget-editor";
 import {
   createThemePackageBlob,
-  installThemePackageFile,
+  previewThemePackageFile,
   resetThemePackageState,
+  type ThemePackagePreview,
 } from "@/lib/theme-package";
 
 type ThemeSection =
@@ -86,6 +87,10 @@ type PhoneThemeAppProps = {
     dock?: DesktopIconId[];
     folders?: DesktopFolderMap;
   }) => void;
+  /** zip 导入先进桌面预览（内存态），由用户在预览条上确认才落盘 */
+  onThemePreviewRequest: (preview: ThemePackagePreview) => void;
+  /** 当前是否已有一份预览挂着的（导入/恢复默认期间用于提示） */
+  themePreviewActive: boolean;
   pageIcons: DesktopIconLayout;
   iconSkins: Record<string, string | null>;
   wallpaperStyle?: CSSProperties;
@@ -185,6 +190,8 @@ export function PhoneThemeApp({
   widgets,
   onWidgetsChange,
   onDesktopThemeChange,
+  onThemePreviewRequest,
+  themePreviewActive,
   pageIcons,
   iconSkins,
   wallpaperStyle,
@@ -240,19 +247,20 @@ export function PhoneThemeApp({
 
     setThemeTransferBusy(true);
     try {
-      const result = await installThemePackageFile(file);
-      onDesktopThemeChange({ widgets: result.widgets, iconLayout: result.iconLayout, dock: result.dock, folders: result.folders });
-      await onApply(result.themeProfile);
-      onDraftChange(result.themeProfile);
+      // 只解析不落盘：交给桌面进入预览态，「应用」才写入存储，「还原」零副作用
+      const result = await previewThemePackageFile(file);
       setShowThemeTransfer(false);
-      onNotice(`已导入主题包：${result.summary.assetCount} 个资源，${result.summary.widgetCount} 个桌面组件。`);
+      onThemePreviewRequest(result);
+      onNotice(result.kind === "css-pack"
+        ? `已进入 CSS 美化包预览，回到桌面点「应用」保留效果。`
+        : `已进入《${result.name}》预览，回到桌面点「应用」保留效果。`);
     } catch (error) {
       console.error(error);
-      onNotice(error instanceof Error ? error.message : "主题导入失败");
+      onNotice(error instanceof Error ? error.message : "主题包解析失败");
     } finally {
       setThemeTransferBusy(false);
     }
-  }, [onApply, onDesktopThemeChange, onDraftChange, onNotice]);
+  }, [onNotice, onThemePreviewRequest]);
 
   const handleResetTheme = useCallback(async () => {
     setThemeTransferBusy(true);
@@ -454,7 +462,7 @@ export function PhoneThemeApp({
              会把没有注册 UTI 的类型直接置灰，反而选不中（这正是此处历史上不写 accept
              的原因，但那样又牺牲了安卓）。
           所以只保留两端都认识的标准类型。主题包导出已是标准 .zip，最终仍由
-          installThemePackageFile 校验包内 manifest.json，非法文件照样会被拒。 */}
+          previewThemePackageFile 校验包内容（manifest.json 或 .css 文件），非法文件照样会被拒。 */}
       <input
         ref={importFileRef}
         type="file"
@@ -477,8 +485,16 @@ export function PhoneThemeApp({
               主题包会包含主题色、壁纸、图标、桌面组件、自定义组件，以及桌面图标和组件位置。
             </p>
             <p className="ts-11 leading-relaxed text-[var(--c-icon)]">
-              {"点「导入」会打开系统文件选择器，选择 .zip 主题包即可；若是旧的 .ai-theme / .aiphone 包，在文件管理器里把筛选切到「所有文件」后再选。"}
+              {"点「导入」打开系统文件选择器，选 .zip 即可。导入后先在桌面上预览效果，满意再点「应用」；点「还原」则完全不留痕迹。"}
             </p>
+            <p className="ts-11 leading-relaxed text-[var(--c-icon)]">
+              {"没有 manifest.json 的社区美化包也支持：包内的 .css 会合并进全局样式，url() 引用的图片/字体会自动从包里读取。"}
+            </p>
+            {themePreviewActive && (
+              <p className="ts-11 leading-relaxed text-[var(--c-warning, #ff9500)]">
+                当前已有一份预览待确认，再次导入将叠加在这份预览之上（「还原」会回到最初的外观）。
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-8 py-1">
               <button
                 type="button"
@@ -489,7 +505,7 @@ export function PhoneThemeApp({
                 <span className="card-icon" style={menuIconStyle(BINDING_ACCENTS.api)}>
                   <Upload size={20} strokeWidth={1.75} />
                 </span>
-                <span>导入</span>
+                <span>导入预览</span>
               </button>
               <button
                 type="button"
