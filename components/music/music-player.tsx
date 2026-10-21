@@ -16,6 +16,9 @@ import {
 } from "@/lib/music-service";
 import MusicCommentsPage from "./music-comments";
 import MusicArtistPage from "./music-artist";
+import ListenTogetherPanel from "./listen-together-panel";
+import ListenTogetherLayer from "./listen-together-layer";
+import { emitListenUserAction, loadListenSession, saveListenSession, type ListenSession } from "@/lib/music-listen-together";
 import { loadMusicBg, playerBgStyle, MUSIC_BG_EVENT, type MusicBgConfig } from "@/lib/music-bg";
 
 const PLAY_MODE_ICONS: Record<PlayMode, { svg: string; label: string }> = {
@@ -67,6 +70,8 @@ export default function MusicPlayer() {
         (typeof window !== "undefined" && kvGet("music-player-style") === "vinyl") ? "vinyl" : "modern");
     const [showQueue, setShowQueue] = useState(false);
     const [showComments, setShowComments] = useState(false);
+    const [listenSetupOpen, setListenSetupOpen] = useState(false);
+    const [listenSession, setListenSession] = useState<ListenSession>(() => loadListenSession());
     const [artistView, setArtistView] = useState<{ id: number; name: string } | null>(null);
     const [palette, setPalette] = useState<CoverPalette>(DEFAULT_COVER_PALETTE);
     const [bgCfg, setBgCfg] = useState<MusicBgConfig>(() => loadMusicBg());
@@ -206,6 +211,7 @@ export default function MusicPlayer() {
         const time = getTimeFromEvent(e.clientX);
         setDragTime(time);
         player.seek(time);
+        emitListenUserAction("seek");
         setIsDragging(false);
     }, [isDragging, getTimeFromEvent, player]);
 
@@ -271,7 +277,10 @@ export default function MusicPlayer() {
     const handleLyricClick = useCallback((idx: number, e: React.MouseEvent) => {
         e.stopPropagation();
         const line = parsedLyrics.current[idx];
-        if (line) player.seek(line.time);
+        if (line) {
+            player.seek(line.time);
+            emitListenUserAction("seek");
+        }
     }, [player]);
 
     const [liked, setLiked] = useState(false);
@@ -465,6 +474,14 @@ export default function MusicPlayer() {
                             <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
                         </svg>
                     </button>
+                    <button className="music-player-ctrl-btn mp-top-btn" onClick={() => setListenSetupOpen(true)} title={listenSession.active ? "一起听设置" : "一起听"} {...(listenSession.active ? { "data-active": "" } : {})}>
+                        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20" />
+                            <circle cx="10" cy="8" r="3.2" />
+                            <path d="M20 20v-1.5a3.5 3.5 0 0 0-2.6-3.4" />
+                            <path d="M15.5 5.2a3.2 3.2 0 0 1 0 5.6" />
+                        </svg>
+                    </button>
                     <button className="music-player-ctrl-btn mp-top-btn" onClick={openMiniChat} title="聊天小窗">
                         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -583,12 +600,12 @@ export default function MusicPlayer() {
                 <button className="music-player-ctrl-btn mp-ctrl-side" onClick={cyclePlayMode} title={modeInfo.label}>
                     <svg width="20" height="20" viewBox="0 0 24 24" dangerouslySetInnerHTML={{ __html: modeInfo.svg }} />
                 </button>
-                <button className="music-player-ctrl-btn mp-ctrl" onClick={handlePrev}>
+                <button className="music-player-ctrl-btn mp-ctrl" onClick={() => { emitListenUserAction("skip"); handlePrev(); }}>
                     <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
                     </svg>
                 </button>
-                <button className="music-player-ctrl-btn mp-ctrl-play" onClick={player.togglePlay}>
+                <button className="music-player-ctrl-btn mp-ctrl-play" onClick={() => { emitListenUserAction(player.isPlaying ? "pause" : "play"); player.togglePlay(); }}>
                     {player.isPlaying ? (
                         <svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M6 4h4v16H6zm8 0h4v16h-4z" />
@@ -599,7 +616,7 @@ export default function MusicPlayer() {
                         </svg>
                     )}
                 </button>
-                <button className="music-player-ctrl-btn mp-ctrl" onClick={handleNext}>
+                <button className="music-player-ctrl-btn mp-ctrl" onClick={() => { emitListenUserAction("skip"); handleNext(); }}>
                     <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M6 18l8.5-6L6 6v12zm8.5 0h2V6h-2v12z" />
                     </svg>
@@ -735,6 +752,37 @@ export default function MusicPlayer() {
                     artist={track.artist}
                     coverUrl={track.coverUrl}
                     onClose={() => setShowComments(false)}
+                />
+            )}
+
+            {/* Listen-together setup panel */}
+            {listenSetupOpen && (
+                <ListenTogetherPanel
+                    initial={listenSession}
+                    onStart={(session) => {
+                        saveListenSession(session);
+                        setListenSession(session);
+                        setListenSetupOpen(false);
+                    }}
+                    onClose={() => setListenSetupOpen(false)}
+                />
+            )}
+
+            {/* Listen-together live layer — danmaku + skip confirmation (non-blocking) */}
+            {listenSession.active && (
+                <ListenTogetherLayer
+                    track={track}
+                    currentTime={Math.floor(currentTime)}
+                    characterIds={listenSession.characterIds}
+                    intervalMin={listenSession.intervalMin}
+                    intervalMax={listenSession.intervalMax}
+                    onSkip={handleNext}
+                    onToast={showMusicToast}
+                    onStop={() => {
+                        const next = { ...listenSession, active: false };
+                        saveListenSession(next);
+                        setListenSession(next);
+                    }}
                 />
             )}
 
