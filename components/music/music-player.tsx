@@ -16,6 +16,7 @@ import {
 } from "@/lib/music-service";
 import MusicCommentsPage from "./music-comments";
 import MusicArtistPage from "./music-artist";
+import ListenTogetherPanel from "./listen-together-panel";
 import { loadMusicBg, playerBgStyle, MUSIC_BG_EVENT, type MusicBgConfig } from "@/lib/music-bg";
 
 const PLAY_MODE_ICONS: Record<PlayMode, { svg: string; label: string }> = {
@@ -67,6 +68,7 @@ export default function MusicPlayer() {
         (typeof window !== "undefined" && kvGet("music-player-style") === "vinyl") ? "vinyl" : "modern");
     const [showQueue, setShowQueue] = useState(false);
     const [showComments, setShowComments] = useState(false);
+    const [showListenTogether, setShowListenTogether] = useState(false);
     const [artistView, setArtistView] = useState<{ id: number; name: string } | null>(null);
     const [palette, setPalette] = useState<CoverPalette>(DEFAULT_COVER_PALETTE);
     const [bgCfg, setBgCfg] = useState<MusicBgConfig>(() => loadMusicBg());
@@ -465,6 +467,14 @@ export default function MusicPlayer() {
                             <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
                         </svg>
                     </button>
+                    <button className="music-player-ctrl-btn mp-top-btn" onClick={() => setShowListenTogether(true)} title="一起听">
+                        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20" />
+                            <circle cx="10" cy="8" r="3.2" />
+                            <path d="M20 20v-1.5a3.5 3.5 0 0 0-2.6-3.4" />
+                            <path d="M15.5 5.2a3.2 3.2 0 0 1 0 5.6" />
+                        </svg>
+                    </button>
                     <button className="music-player-ctrl-btn mp-top-btn" onClick={openMiniChat} title="聊天小窗">
                         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -735,6 +745,16 @@ export default function MusicPlayer() {
                     artist={track.artist}
                     coverUrl={track.coverUrl}
                     onClose={() => setShowComments(false)}
+                />
+            )}
+
+            {/* Listen-together overlay — characters comment on / decide to skip the track */}
+            {showListenTogether && (
+                <ListenTogetherPanel
+                    track={track}
+                    onClose={() => setShowListenTogether(false)}
+                    onSkip={handleNext}
+                    onToast={showMusicToast}
                 />
             )}
 
