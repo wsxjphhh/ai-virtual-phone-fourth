@@ -749,10 +749,9 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
         // 只有附件、没有文字也算一次有效发送（把材料丢给角色读）
         if (!trimmed && !hasDocs) return;
         if (hasDocs && !onSendDocAttachments()) return;
-        if (trimmed && !onSendText(trimmed, { autoReply: false })) return;
-        // 有附件时顺手要一次回复（材料刚进上下文，角色该有反应）；
-        // 纯文字保持原样——发送本身不自动触发回复，由「主动回复」按钮决定
-        if (hasDocs) onTriggerAIResponse();
+        // 文字落库后再触发回复；带文字的附件也由该路径统一触发，避免重复请求。
+        if (trimmed && !onSendText(trimmed, { autoReply: true })) return;
+        if (hasDocs && !trimmed) onTriggerAIResponse();
         setInputText("");
         resetTextareaHeight();
         onClosePanels();
