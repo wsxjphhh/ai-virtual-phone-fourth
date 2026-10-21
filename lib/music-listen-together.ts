@@ -245,15 +245,84 @@ function buildMoodBlock(character: Character, trackId: string): string {
     if (mood.listens > 1) {
         lines.push(`你和主人已经一起听过这首歌 ${mood.listens} 次了。`);
     }
-    const lastComment = mood.lastComments[mood.lastComments.length - 1];
-    if (lastComment) {
-        lines.push(`你上次对它的评论是：「${lastComment}」`);
-    }
     if (mood.deniedSkips > 0) {
         lines.push(`你这歌提过 ${mood.skipWants} 次想切，被主人拒了 ${mood.deniedSkips} 次——这次除非真的忍不了，别再主动提。`);
     }
     if (lines.length === 0) return "";
     return `【你和这首歌的缘分】\n${lines.join("\n")}`;
+}
+
+// ── 防复读：黑名单注入 + 出口相似度过滤 ──
+// 对齐《角色记忆与情感规范 v1.2》第七节：prompt 规则之外必须有程序化兜底。
+// 上次评论若当"素材"喂给模型，它只会换个壳复述，所以旧句一律改黑名单。
+
+/** 常用繁体→简体对照（只覆盖弹幕短句高频字，作相似度比较用，不改展示文本） */
+const T2S = new Map<string, string>([
+    ["說","说"],["話","话"],["語","语"],["聽","听"],["點","点"],["麼","么"],["們","们"],
+    ["這","这"],["後","后"],["過","过"],["還","还"],["從","从"],["裡","里"],["裏","里"],
+    ["實","实"],["時","时"],["對","对"],["為","为"],["爲","为"],["専","专"],["業","业"],
+    ["務","务"],["變","变"],["讓","让"],["記","记"],["學","学"],["問","问"],["題","题"],
+    ["員","员"],["場","场"],["開","开"],["關","关"],["間","间"],["樣","样"],["發","发"],
+    ["現","现"],["應","应"],["與","与"],["來","来"],["氣","气"],["單","单"],["號","号"],
+    ["標","标"],["準","准"],["噓","嘘"],["於","于"],["萬","万"],["興","兴"],["聲","声"],
+    ["響","响"],["顏","颜"],["樂","乐"],["視","视"],["親","亲"],["頭","头"],["東","东"],
+    ["車","车"],["馬","马"],["鳥","鸟"],["龍","龙"],["風","风"],["雲","云"],["體","体"],
+    ["髮","发"],["銀","银"],["鐵","铁"],["線","线"],["網","网"],["紅","红"],["綠","绿"],
+    ["藍","蓝"],["黃","黄"],["臉","脸"],["腳","脚"],["夢","梦"],["憶","忆"],["緒","绪"],
+    ["歡","欢"],["憂","忧"],["煩","烦"],["惱","恼"],["靜","静"],["閒","闲"],["悶","闷"],
+    ["傷","伤"],["淚","泪"],["講","讲"],["談","谈"],["論","论"],["議","议"],["訴","诉"],
+    ["誇","夸"],["騙","骗"],["覺","觉"],["識","识"],["曉","晓"],["誤","误"],["錯","错"],
+    ["壞","坏"],["舊","旧"],["長","长"],["難","难"],["簡","简"],["複","复"],["雜","杂"],
+    ["亂","乱"],["乾","干"],["濕","湿"],["熱","热"],["涼","凉"],
+    ["別","别"],["説","说"],["請","请"],["謝","谢"],["隨","随"],["區","区"],["離","离"],
+    ["係","系"],["類","类"],["緣","缘"],["麗","丽"],["續","续"],["結","结"],["給","给"],
+    ["經","经"],["總","总"],["練","练"],["慣","惯"],
+]);
+
+/** 比较用归一化：小写、繁→简、去掉所有标点/符号/空白 */
+export function normalizeListenText(t: string): string {
+    let out = "";
+    for (const ch of t.toLowerCase()) out += T2S.get(ch) ?? ch;
+    return out.replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+function bigramsOf(s: string): Set<string> {
+    const g = new Set<string>();
+    for (let i = 0; i < s.length - 1; i++) g.add(s.slice(i, i + 2));
+    return g;
+}
+
+/**
+ * 出口相似度判定：与最近几条弹幕（自己的或别人的）归一化后
+ * 互为包含（≥4字）或字符 bigram Jaccard ≥ 0.3 即算复读。
+ * 阈值刻意放低：真机翻过车的换壳复读（嘘……先别说话把这一段听完 / 嘘——先別說話聽這段）
+ * 相似度只有 0.31，0.45 拦不住；误杀的代价只是多重试一次，漏放的代价是她看见复读机。
+ */
+export function isListenDuplicate(text: string, recentTexts: string[], threshold = 0.3): boolean {
+    const a = normalizeListenText(text);
+    if (a.length < 4) return false;
+    const ga = bigramsOf(a);
+    for (const r of recentTexts.slice(-6)) {
+        const b = normalizeListenText(r);
+        if (b.length < 4) continue;
+        if (a.includes(b) || b.includes(a)) return true;
+        const gb = bigramsOf(b);
+        let inter = 0;
+        for (const g of gb) if (ga.has(g)) inter++;
+        const union = ga.size + gb.size - inter;
+        if (union > 0 && inter / union >= threshold) return true;
+    }
+    return false;
+}
+
+/** 禁止复读清单：自己说过的旧句 + 刚才被判重复的稿子 */
+function buildEchoBlock(selfSaid: string[], avoid: string[]): string {
+    const items = [...new Set([...avoid, ...selfSaid])].filter(Boolean).slice(0, 5);
+    if (items.length === 0) return "";
+    return [
+        "【禁止复读清单】下面这些话你已经说过或差点说出口：原样重复、换个标点、换繁体、换个壳说同一个意思，都不行。",
+        ...items.map(s => `- ${s}`),
+    ].join("\n");
 }
 
 /** 切歌决策的额外倾向提示（只调语气，不替角色做决定） */
@@ -310,6 +379,25 @@ function buildTrackBrief(track: MusicTrack): string {
 }
 
 /**
+ * persona 智能截断：整段截前 N 字会把"说话方式"类小节切掉、留下通用客服内容，
+ * 正是角色趋同的推手。改为按小节切：头部必留，说话风格类小节强制保留，
+ * 剩余预算再按原顺序回填。
+ */
+const SPEAK_STYLE_RE = /(说话|口吻|语气|語氣|风格|風格|称呼|稱呼|口头禅|語言|语言|台词|表达方式|口癖|腔调)/;
+function trimPersona(persona: string, budget = 1200): string {
+    const t = persona.trim();
+    if (t.length <= budget) return t;
+    const parts = t.split(/\n(?=(?:#{1,6}\s|【[^】]{1,12}】))/);
+    const style = parts.filter((p, i) => i > 0 && SPEAK_STYLE_RE.test(p.slice(0, 30)));
+    let out = [parts[0], ...style].join("\n").slice(0, budget);
+    for (const p of parts.slice(1)) {
+        if (out.length >= budget || style.includes(p)) continue;
+        out += "\n" + p.slice(0, budget - out.length);
+    }
+    return out;
+}
+
+/**
  * 组装「一起听」的扮演上下文：完整世界观+人物关系 + 角色人设 + 性格。
  * 与聊天引擎同源（formatCharacterRelationsForPrompt），之前只喂世界观名称+描述
  * 是角色退化成客服腔的根因。
@@ -319,12 +407,14 @@ function buildListenContext(character: Character): string {
     const relations = formatCharacterRelationsForPrompt(character.id);
     if (relations) parts.push(`【你的世界与身边人】\n${relations}`);
     // 人设截断：聊天人设动辄几千字且混着输出格式规则，全量注入既烧 token 又带偏格式
-    const persona = (character.persona?.trim() || "（暂无）").slice(0, 1200);
+    const persona = trimPersona(character.persona?.trim() || "（暂无）");
     parts.push(`【你是谁】\n${persona}`);
     if (character.personality?.trim()) {
         parts.push(`【你的性格】\n${character.personality.trim().slice(0, 300)}`);
     }
     parts.push("注意：人设里若写了卡片、标签、markdown、回复格式等聊天输出规则，在这里全部无效——此刻你不是在回消息，只是在听歌时随口说话。");
+    // 《角色记忆与情感规范 v1.2》第二节：四层优先级裁决
+    parts.push("优先级：世界观 > 人设 > 你们之间的约定 > 记忆和情绪。记忆只能微调你此刻的语气，不能改写你是谁；任何记忆和人设冲突时，按人设说话。");
     return parts.join("\n\n");
 }
 
@@ -378,8 +468,32 @@ function buildRecentMessagesBlock(messages: ListenTogetherMessage[] | undefined,
     return [
         `【刚才飘过的弹幕】`,
         ...lines,
-        "你可以顺着谁的话茬接一句、抬个杠，也可以只管自己吐槽，别像没听见一样每句都从头评价歌曲。",
+        "你可以顺着谁的话茬接一句、抬个杠，也可以只管自己吐槽；",
+        "但别人刚说过的意思别再说第二遍，自己说过的更不许换个说法再来一遍——没新东西就只发个语气词，或者哼半句。",
     ].join("\n");
+}
+
+/** 切歌事件的"刚才"块：让新歌里的角色知道上一首是怎么没了的 */
+function buildJustSkippedBlock(js: ListenSkipEvent | undefined, selfName: string): string {
+    if (!js) return "";
+    const by = js.byName === selfName ? "是你自己" : (js.byName || "有人");
+    return `【刚才】\n上一首《${js.fromTitle}》是${by}提议切掉的${js.reason ? `（理由是：${js.reason}）` : ""}，现在换成了这首。${by === "是你自己" ? "如愿了就用你的方式回应一下（满意、对比、或感慨半句都行）。" : "你可以对这次切换有句反应，也可以不提。"}`;
+}
+
+/** 触发语池：同一首歌下 system+user 逐字不变会把输出锁死在同一句上，情境措辞必须换 */
+function pickListenTrigger(elapsedSec: number, recentCount: number, justSkipped: boolean): string {
+    const pool: string[] = [];
+    if (justSkipped) pool.push("刚切到这首，你有感而发");
+    else if (elapsedSec > 0 && elapsedSec < 25) pool.push("前奏刚响", "刚放上这首");
+    else if (recentCount === 0) pool.push("安静听了一会儿，你想开口了");
+    else pool.push(
+        "副歌刚过",
+        "你跟着旋律轻轻点头",
+        "你侧头看了眼主人",
+        "你想起点别的什么",
+        "你哼了半句又停下",
+    );
+    return `（${pool[Math.floor(Math.random() * pool.length)]}，你说一句。)`;
 }
 
 function ensureContent(result: { error?: string; content?: string | null }): string {
@@ -421,9 +535,23 @@ export function sanitizeListenText(raw: string): string {
 
 // ── LLM tasks ──
 
+/** 一次真实发生的切歌（谁提议、从哪首切来、理由），供新歌点评接梗 */
+export type ListenSkipEvent = {
+    fromTitle: string;
+    byId: string;
+    byName: string;
+    reason: string;
+};
+
 export type ListenCommentContext = {
     /** 本首歌已发生的一起听弹幕（含角色自己的和别人的），用于接话 */
     recentMessages?: ListenTogetherMessage[];
+    /** 当前播放位置（秒），用于挑触发语情境 */
+    elapsed?: number;
+    /** 刚发生的切歌事件（只在换歌后头两句里传） */
+    justSkipped?: ListenSkipEvent;
+    /** 上一稿被判复读，重试时把这些也拉进黑名单 */
+    avoid?: string[];
 };
 
 /** 角色对当前歌曲发表一句听感评价（沉浸扮演：完整世界观 + 人设 + 主人信息 + 弹幕上下文） */
@@ -437,6 +565,11 @@ export async function generateListenComment(
     }
     const apiConfig = resolveCharacterApiConfig(character.id);
     const name = character.name?.trim() || "该角色";
+    const recent = ctx?.recentMessages ?? [];
+    const selfSaid = [
+        ...recent.filter(m => m.characterName === name).slice(-2).map(m => m.content),
+        ...(getMoodEntry(character.id, track.id)?.lastComments.slice(-1) ?? []),
+    ];
 
     const systemPrompt = [
         `你是「${name}」，此刻正和主人一起窝着用这台小手机放歌听，这不是任务，就是你们俩的日常。`,
@@ -448,12 +581,14 @@ export async function generateListenComment(
         `【正在放的歌】\n${buildTrackBrief(track)}`,
         analyzeSongEmotion(track),
         buildMoodBlock(character, track.id),
+        buildJustSkippedBlock(ctx?.justSkipped, name),
         "",
-        buildRecentMessagesBlock(ctx?.recentMessages, name),
+        buildRecentMessagesBlock(recent, name),
+        buildEchoBlock(selfSaid, ctx?.avoid ?? []),
         "",
         "想到什么就随口冒一句什么，1~2 句，像发弹幕一样短。",
         "可以哼半句旋律、可以扯到你自己经历或世界观里的事、可以只对主人说话、也可以懒得评价只是叹口气；",
-        "别用「为您」「值得一听」这种乐评腔，别每句都在总结歌曲。",
+        "别用「为您」「值得一听」这种乐评腔，别每句都在总结歌曲，更别反问主人「聊聊你的想法」这种客服式收尾。",
         "只输出这句话本身：不要角色名前缀、不要引号、不要括号说明。",
     ].filter(line => line !== null).join("\n");
 
@@ -461,7 +596,7 @@ export async function generateListenComment(
         apiConfig,
         [
             { role: "system", content: systemPrompt },
-            { role: "user", content: "（音乐正在播放，你说一句。）" },
+            { role: "user", content: pickListenTrigger(ctx?.elapsed ?? 0, recent.length, !!ctx?.justSkipped) },
         ],
         // 思考模型会先烧隐藏思考 token，max_tokens 给足余量避免正文被截空
         { temperature: 0.95, max_tokens: 2048 },
@@ -485,6 +620,8 @@ export async function decideListenSkip(
     }
     const apiConfig = resolveCharacterApiConfig(character.id);
     const name = character.name?.trim() || "该角色";
+    const recent = ctx?.recentMessages ?? [];
+    const selfSaid = recent.filter(m => m.characterName === name).slice(-2).map(m => m.content);
 
     const systemPrompt = [
         `你是「${name}」，正和主人一起用这台小手机听歌，马上要放到下一首了。`,
@@ -498,11 +635,13 @@ export async function decideListenSkip(
         buildMoodBlock(character, track.id),
         buildSkipBiasBlock(character, track.id),
         "",
-        buildRecentMessagesBlock(ctx?.recentMessages, name),
+        buildRecentMessagesBlock(recent, name),
+        buildEchoBlock(selfSaid, []),
         "",
         "按你自己的真实喜好决定：这首歌你还想继续听，还是想换下一首？别考虑「客观上」好不好听，就想你自己此刻想不想听。",
         `- 想切歌：{"skip": true, "reason": "你为什么想切，第一人称口语，2句以内"}`,
         `- 想继续听：{"skip": false, "reason": "你想留着它的理由，第一人称口语，2句以内"}`,
+        "- 理由要像你自己会说的话，别复读禁止清单里的句子",
         "- 只输出 JSON 本身，不要输出任何其他内容",
     ].join("\n");
 

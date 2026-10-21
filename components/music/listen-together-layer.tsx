@@ -18,6 +18,8 @@ import {
     markListenHeard,
     markSkipWanted,
     markSkipDenied,
+    isListenDuplicate,
+    type ListenSkipEvent,
     type ListenTogetherMessage,
 } from "@/lib/music-listen-together";
 
@@ -102,6 +104,10 @@ export default function ListenTogetherLayer({
     const proposalsRef = useRef<Map<number, SkipProposal>>(new Map());
     const pendingSkipRef = useRef<PendingSkip | null>(null);
     pendingSkipRef.current = pendingSkip;
+    // 切歌连续性：真实发生过的切换（谁提议、从哪首切来），新歌头两句点评会带上它
+    const lastSkipEventRef = useRef<ListenSkipEvent | null>(null);
+    const skipEchoLeftRef = useRef(0);
+    const firstSpeakerRef = useRef<string | null>(null);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -114,7 +120,9 @@ export default function ListenTogetherLayer({
     useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
     useEffect(() => { intervalRef.current = { min: intervalMin, max: intervalMax }; }, [intervalMin, intervalMax]);
 
-    // 切歌后清空弹幕与提议，重新计时；本首歌对所有参与者记一次"听过"
+    // 切歌后清空弹幕与提议，重新计时；本首歌对所有参与者记一次"听过"。
+    // 若这次换歌是角色提议切出来的：新歌头两句带上"刚才"块，且提议者优先开口。
+    const prevTrackIdRef = useRef<string | null>(null);
     useEffect(() => {
         setBubbles([]);
         removeTimersRef.current.forEach(t => clearTimeout(t));
@@ -124,6 +132,15 @@ export default function ListenTogetherLayer({
         askedRef.current.clear();
         lastAutoEvalRef.current = 0;
         setPendingSkip(null);
+        const trackChanged = prevTrackIdRef.current !== null && prevTrackIdRef.current !== track.id;
+        prevTrackIdRef.current = track.id;
+        if (trackChanged && lastSkipEventRef.current) {
+            skipEchoLeftRef.current = 2;
+            firstSpeakerRef.current = lastSkipEventRef.current.byId;
+        } else if (trackChanged) {
+            skipEchoLeftRef.current = 0;
+            firstSpeakerRef.current = null;
+        }
         markListenHeard(characterIds, track.id);
     }, [track.id, characterIds]);
 
@@ -154,6 +171,30 @@ export default function ListenTogetherLayer({
             };
             appendListenHistory(trackRef.current.id, message);
         } catch { /* ignore */ }
+    }, []);
+
+    // 生成一条点评并过出口相似度关：疑似复读就换稿重试一次，仍重复直接丢弃不发。
+    // 语义换壳靠 prompt 黑名单拦，程序只兜"近原样重复"这一层（规范第七节的思路）。
+    const generateUniqueComment = useCallback(async (character: Character): Promise<string | null> => {
+        const recentMessages = loadListenHistory(trackRef.current.id);
+        const recentTexts = recentMessages.slice(-6).map(m => m.content);
+        let justSkipped: ListenSkipEvent | undefined;
+        if (skipEchoLeftRef.current > 0 && lastSkipEventRef.current) {
+            justSkipped = lastSkipEventRef.current;
+            skipEchoLeftRef.current -= 1;
+        }
+        let avoid: string[] | undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const text = await generateListenComment(character, trackRef.current, {
+                recentMessages,
+                elapsed: currentTimeRef.current,
+                justSkipped,
+                avoid,
+            });
+            if (!isListenDuplicate(text, recentTexts)) return text;
+            avoid = [text];
+        }
+        return null;
     }, []);
 
     // 收到一张"想切"票后按人数决定打扰方式：
@@ -205,11 +246,16 @@ export default function ListenTogetherLayer({
         const chars = charsRef.current;
         if (chars.length === 0 || speakingRef.current) return;
         speakingRef.current = true;
-        const character = chars[Math.floor(Math.random() * chars.length)];
+        // 刚被切歌接手的：提议者优先开口，让"如愿/对比"有处安放
+        let character = chars[Math.floor(Math.random() * chars.length)];
+        if (firstSpeakerRef.current) {
+            const preferred = chars.find(c => c.id === firstSpeakerRef.current);
+            if (preferred) character = preferred;
+            firstSpeakerRef.current = null;
+        }
         try {
-            const recentMessages = loadListenHistory(trackRef.current.id);
-            const text = await generateListenComment(character, trackRef.current, { recentMessages });
-            if (!mountedRef.current) return;
+            const text = await generateUniqueComment(character);
+            if (!mountedRef.current || !text) return;
             pushBubble(character, text, "comment");
             recordHistory(character, "comment", text);
         } catch {
@@ -217,7 +263,7 @@ export default function ListenTogetherLayer({
         } finally {
             speakingRef.current = false;
         }
-    }, [pushBubble, recordHistory]);
+    }, [generateUniqueComment, pushBubble, recordHistory]);
 
     // 随机自动发言调度器：偶尔不点评，改成琢磨要不要切歌
     const scheduleNext = useCallback(() => {
@@ -262,8 +308,8 @@ export default function ListenTogetherLayer({
         for (const character of chars) {
             if (!mountedRef.current) break;
             try {
-                const recentMessages = loadListenHistory(trackRef.current.id);
-                const text = await generateListenComment(character, trackRef.current, { recentMessages });
+                const text = await generateUniqueComment(character);
+                if (!text) continue; // 两次都判复读：宁可不发
                 pushBubble(character, text, "comment");
                 recordHistory(character, "comment", text);
             } catch {
@@ -276,7 +322,7 @@ export default function ListenTogetherLayer({
         } else if (failed > 0) {
             onToast?.(`${failed} 位角色没回应`);
         }
-    }, [busyAll, pushBubble, recordHistory, onToast]);
+    }, [busyAll, generateUniqueComment, pushBubble, recordHistory, onToast]);
 
     // 手动：问问谁想切歌（用户主动问的，问到就说，直接弹窗）
     const handleAskSkip = useCallback(async () => {
@@ -291,6 +337,12 @@ export default function ListenTogetherLayer({
         const ps = pendingSkipRef.current;
         if (!ps || ps.proposers.length === 0) return;
         const first = ps.proposers[0];
+        lastSkipEventRef.current = {
+            fromTitle: trackRef.current.title || "上一首",
+            byId: first.character.id,
+            byName: first.character.name || "角色",
+            reason: ps.proposers.map(p => p.reason).join(" / "),
+        };
         pushBubble(first.character, `（切歌）${ps.proposers.map(p => p.reason).join(" / ")}`, "skip");
         recordHistory(first.character, "skip", ps.proposers.map(p => p.reason).join(" / "));
         setPendingSkip(null);
@@ -320,6 +372,12 @@ export default function ListenTogetherLayer({
         const timer = removeTimersRef.current.get(key);
         if (timer) { clearTimeout(timer); removeTimersRef.current.delete(key); }
         setBubbles(prev => prev.filter(b => b.key !== key));
+        lastSkipEventRef.current = {
+            fromTitle: trackRef.current.title || "上一首",
+            byId: proposal.character.id,
+            byName: proposal.character.name || "角色",
+            reason: proposal.reason,
+        };
         pushBubble(proposal.character, `（切歌）${proposal.reason}`, "skip");
         recordHistory(proposal.character, "skip", proposal.reason);
         onSkip();
