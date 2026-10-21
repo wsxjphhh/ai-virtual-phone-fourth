@@ -5343,3 +5343,378 @@
     color: #c4533e;
     font-size: calc(10.8px*var(--app-text-scale,1));
 }
+
+/* ── 一起听 · 设置面板补充（说明/间隔/底部按钮） ── */
+
+.lt-intro {
+    padding: 4px 16px 8px;
+    color: color-mix(in srgb, var(--c-music-text) 62%, transparent);
+    font-size: calc(11.7px*var(--app-text-scale,1));
+    line-height: 1.5;
+}
+
+.lt-section-label {
+    padding: 8px 16px 4px;
+    font-size: calc(11.7px*var(--app-text-scale,1));
+    font-weight: 700;
+    color: var(--c-music-accent);
+}
+
+.lt-interval {
+    padding: 4px 16px 0;
+}
+
+.lt-interval-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 0;
+}
+
+.lt-interval-name {
+    font-size: calc(12.6px*var(--app-text-scale,1));
+    color: var(--c-music-text);
+}
+
+.lt-stepper {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--c-music-surface);
+    border: 1px solid var(--c-music-accent-dim);
+    border-radius: 10px;
+    padding: 2px;
+}
+
+.lt-stepper button {
+    width: 30px;
+    height: 30px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--c-music-accent);
+    font-size: calc(16px*var(--app-text-scale,1));
+    cursor: pointer;
+}
+
+.lt-stepper button:active {
+    background: var(--c-music-accent-dim);
+}
+
+.lt-stepper span {
+    min-width: 26px;
+    text-align: center;
+    font-size: calc(12.6px*var(--app-text-scale,1));
+    font-weight: 700;
+    color: var(--c-music-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.lt-interval-hint {
+    margin: 4px 0 0;
+    font-size: calc(10.8px*var(--app-text-scale,1));
+    color: color-mix(in srgb, var(--c-music-text) 50%, transparent);
+    line-height: 1.45;
+}
+
+.lt-actions-bottom {
+    margin-top: auto;
+    padding: 12px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ── 一起听 · 实时互动层（弹幕 + 切歌确认） ── */
+
+.lt-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 70;
+    pointer-events: none;
+}
+
+.lt-live-bar {
+    position: absolute;
+    top: calc(52px + env(safe-area-inset-top, 0px));
+    left: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 6px 5px 9px;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--c-music-surface) 86%, transparent);
+    border: 1px solid var(--c-music-surface-solid);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    pointer-events: auto;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+
+.lt-live-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--c-music-accent);
+    animation: lt-pulse 1.6s ease-in-out infinite;
+    flex-shrink: 0;
+}
+
+@keyframes lt-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.7); }
+}
+
+.lt-live-label {
+    font-size: calc(10.8px*var(--app-text-scale,1));
+    color: var(--c-music-text);
+    white-space: nowrap;
+}
+
+.lt-live-btn {
+    border: none;
+    border-radius: 9px;
+    padding: 5px 9px;
+    background: var(--c-music-accent-dim);
+    color: var(--c-music-accent);
+    font-size: calc(10.8px*var(--app-text-scale,1));
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.lt-live-btn:active {
+    transform: scale(0.96);
+}
+
+.lt-live-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.lt-live-stop {
+    background: transparent;
+    color: color-mix(in srgb, var(--c-music-text) 60%, transparent);
+    border: 1px solid var(--c-music-surface-solid);
+}
+
+.lt-layer-error {
+    position: absolute;
+    top: calc(96px + env(safe-area-inset-top, 0px));
+    left: 8px;
+    right: 8px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: rgba(214, 96, 77, 0.92);
+    color: #fff;
+    font-size: calc(10.8px*var(--app-text-scale,1));
+    pointer-events: auto;
+}
+
+.lt-danmaku {
+    position: absolute;
+    right: 8px;
+    bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    max-width: 80%;
+    pointer-events: none;
+}
+
+.lt-bubble {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    max-width: 100%;
+    padding: 8px 10px;
+    border-radius: 14px 14px 4px 14px;
+    background: color-mix(in srgb, var(--c-music-surface) 92%, transparent);
+    border: 1px solid var(--c-music-surface-solid);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.2);
+    animation: lt-bubble-in 0.28s var(--ease-out);
+}
+
+.lt-bubble[data-action="skip"] {
+    background: color-mix(in srgb, var(--c-music-accent) 16%, var(--c-music-surface));
+    border-color: var(--c-music-accent-dim);
+}
+
+@keyframes lt-bubble-in {
+    from { opacity: 0; transform: translateX(24px) scale(0.96); }
+    to { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+.lt-bubble-ava {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: var(--c-music-accent-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.lt-bubble-ava img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.lt-bubble-ava i {
+    font-style: normal;
+    font-size: calc(12px*var(--app-text-scale,1));
+    font-weight: 700;
+    color: var(--c-music-accent);
+}
+
+.lt-bubble-body {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.lt-bubble-name {
+    font-size: calc(9.9px*var(--app-text-scale,1));
+    font-weight: 700;
+    color: var(--c-music-accent);
+    margin-bottom: 1px;
+}
+
+.lt-bubble-text {
+    font-size: calc(12.6px*var(--app-text-scale,1));
+    line-height: 1.42;
+    color: var(--c-music-text);
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
+/* 切歌确认弹窗 */
+.lt-skip-mask {
+    position: absolute;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: auto;
+    animation: lt-fade 0.2s var(--ease-out);
+}
+
+@keyframes lt-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.lt-skip-card {
+    width: 82%;
+    max-width: 320px;
+    padding: 18px 16px 14px;
+    border-radius: 18px;
+    background: var(--c-music-surface);
+    border: 1px solid var(--c-music-surface-solid);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    animation: lt-pop 0.26s var(--ease-out);
+}
+
+@keyframes lt-pop {
+    from { opacity: 0; transform: scale(0.92) translateY(8px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.lt-skip-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.lt-skip-ava {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: var(--c-music-accent-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.lt-skip-ava img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.lt-skip-ava i {
+    font-style: normal;
+    font-size: calc(16px*var(--app-text-scale,1));
+    font-weight: 700;
+    color: var(--c-music-accent);
+}
+
+.lt-skip-title {
+    display: flex;
+    flex-direction: column;
+}
+
+.lt-skip-title b {
+    font-size: calc(14.4px*var(--app-text-scale,1));
+    color: var(--c-music-text);
+}
+
+.lt-skip-title span {
+    font-size: calc(11.7px*var(--app-text-scale,1));
+    color: var(--c-music-accent);
+}
+
+.lt-skip-reason {
+    margin: 0 0 14px;
+    font-size: calc(13.5px*var(--app-text-scale,1));
+    line-height: 1.5;
+    color: var(--c-music-text);
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
+.lt-skip-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.lt-skip-no {
+    flex: 1;
+    padding: 11px 0;
+    border-radius: 12px;
+    border: 1px solid var(--c-music-surface-solid);
+    background: transparent;
+    color: color-mix(in srgb, var(--c-music-text) 70%, transparent);
+    font-size: calc(12.6px*var(--app-text-scale,1));
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.lt-skip-yes {
+    flex: 1.4;
+    padding: 11px 0;
+    border-radius: 12px;
+    border: none;
+    background: var(--c-music-accent);
+    color: #fff;
+    font-size: calc(12.6px*var(--app-text-scale,1));
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.lt-skip-yes:active {
+    transform: scale(0.97);
+}
+
+/* 一起听按钮激活态：顶部小点提示进行中 */
+.mp-top-btn[data-active] {
+    color: var(--c-music-accent);
+}

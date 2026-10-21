@@ -17,6 +17,8 @@ import {
 import MusicCommentsPage from "./music-comments";
 import MusicArtistPage from "./music-artist";
 import ListenTogetherPanel from "./listen-together-panel";
+import ListenTogetherLayer from "./listen-together-layer";
+import { loadListenSession, saveListenSession, type ListenSession } from "@/lib/music-listen-together";
 import { loadMusicBg, playerBgStyle, MUSIC_BG_EVENT, type MusicBgConfig } from "@/lib/music-bg";
 
 const PLAY_MODE_ICONS: Record<PlayMode, { svg: string; label: string }> = {
@@ -68,7 +70,8 @@ export default function MusicPlayer() {
         (typeof window !== "undefined" && kvGet("music-player-style") === "vinyl") ? "vinyl" : "modern");
     const [showQueue, setShowQueue] = useState(false);
     const [showComments, setShowComments] = useState(false);
-    const [showListenTogether, setShowListenTogether] = useState(false);
+    const [listenSetupOpen, setListenSetupOpen] = useState(false);
+    const [listenSession, setListenSession] = useState<ListenSession>(() => loadListenSession());
     const [artistView, setArtistView] = useState<{ id: number; name: string } | null>(null);
     const [palette, setPalette] = useState<CoverPalette>(DEFAULT_COVER_PALETTE);
     const [bgCfg, setBgCfg] = useState<MusicBgConfig>(() => loadMusicBg());
@@ -467,7 +470,7 @@ export default function MusicPlayer() {
                             <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
                         </svg>
                     </button>
-                    <button className="music-player-ctrl-btn mp-top-btn" onClick={() => setShowListenTogether(true)} title="一起听">
+                    <button className="music-player-ctrl-btn mp-top-btn" onClick={() => setListenSetupOpen(true)} title={listenSession.active ? "一起听设置" : "一起听"} {...(listenSession.active ? { "data-active": "" } : {})}>
                         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                             <path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20" />
                             <circle cx="10" cy="8" r="3.2" />
@@ -748,13 +751,33 @@ export default function MusicPlayer() {
                 />
             )}
 
-            {/* Listen-together overlay — characters comment on / decide to skip the track */}
-            {showListenTogether && (
+            {/* Listen-together setup panel */}
+            {listenSetupOpen && (
                 <ListenTogetherPanel
+                    initial={listenSession}
+                    onStart={(session) => {
+                        saveListenSession(session);
+                        setListenSession(session);
+                        setListenSetupOpen(false);
+                    }}
+                    onClose={() => setListenSetupOpen(false)}
+                />
+            )}
+
+            {/* Listen-together live layer — danmaku + skip confirmation (non-blocking) */}
+            {listenSession.active && (
+                <ListenTogetherLayer
                     track={track}
-                    onClose={() => setShowListenTogether(false)}
+                    characterIds={listenSession.characterIds}
+                    intervalMin={listenSession.intervalMin}
+                    intervalMax={listenSession.intervalMax}
                     onSkip={handleNext}
                     onToast={showMusicToast}
+                    onStop={() => {
+                        const next = { ...listenSession, active: false };
+                        saveListenSession(next);
+                        setListenSession(next);
+                    }}
                 />
             )}
 
