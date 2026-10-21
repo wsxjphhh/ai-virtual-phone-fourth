@@ -5540,6 +5540,29 @@
     border-color: var(--c-music-accent-dim);
 }
 
+.lt-bubble[data-action="propose"] {
+    background: color-mix(in srgb, var(--c-music-accent) 10%, var(--c-music-surface));
+    border-style: dashed;
+    border-color: var(--c-music-accent-dim);
+}
+
+.lt-bubble-skip-btn {
+    align-self: flex-start;
+    margin-top: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    border: none;
+    background: var(--c-music-accent);
+    color: #fff;
+    font-size: calc(11.5px*var(--app-text-scale,1));
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.lt-bubble-skip-btn:active {
+    transform: scale(0.95);
+}
+
 @keyframes lt-bubble-in {
     from { opacity: 0; transform: translateX(24px) scale(0.96); }
     to { opacity: 1; transform: translateX(0) scale(1); }
@@ -5679,6 +5702,11 @@
     color: var(--c-music-text);
     word-break: break-word;
     white-space: pre-wrap;
+}
+
+/* 多人提议时收紧理由行距 */
+.lt-skip-reason + .lt-skip-reason {
+    margin-top: -8px;
 }
 
 .lt-skip-actions {

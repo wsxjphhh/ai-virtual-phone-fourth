@@ -768,6 +768,7 @@ export default function MusicPlayer() {
             {listenSession.active && (
                 <ListenTogetherLayer
                     track={track}
+                    currentTime={Math.floor(currentTime)}
                     characterIds={listenSession.characterIds}
                     intervalMin={listenSession.intervalMin}
                     intervalMax={listenSession.intervalMax}

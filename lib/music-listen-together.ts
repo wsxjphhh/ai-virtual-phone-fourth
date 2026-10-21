@@ -4,8 +4,8 @@
 // 不走预设系统组装（角色扮演预设会污染这类结构化/短评任务）。
 
 import { simpleLLMCall } from "./api-helpers";
-import { loadApiConfigs, loadBindingConfig, resolveBinding } from "./settings-storage";
-import { getCharacterWorldGroup } from "./character-world-storage";
+import { loadApiConfigs, loadBindingConfig, resolveBinding, resolveUserIdentity } from "./settings-storage";
+import { formatCharacterRelationsForPrompt } from "./character-world-storage";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import type { ApiConfig } from "./settings-types";
 import type { Character } from "./character-types";
@@ -73,6 +73,13 @@ export function appendListenHistory(trackId: string, message: ListenTogetherMess
     const prev = Array.isArray(map[trackId]) ? map[trackId] : [];
     map[trackId] = [...prev, message].slice(-PER_TRACK_CAP);
     persistHistoryMap(map);
+    // 点评同步进角色×歌的情绪记忆（保留最近两句，供下次做"缘分"回灌）
+    if (message.action === "comment" && message.content?.trim()) {
+        updateMoodEntry(message.characterId, trackId, m => ({
+            ...m,
+            lastComments: [...m.lastComments, message.content.trim()].slice(-MOOD_COMMENT_KEEP),
+        }));
+    }
 }
 
 /** 记住用户上次选择的角色，下次开面板自动勾上 */
@@ -138,6 +145,131 @@ export function saveListenSession(session: ListenSession): void {
     try { kvSet(SESSION_KEY, JSON.stringify(session)); } catch { /* ignore */ }
 }
 
+// ── 情绪记忆（只记可观测行为信号，不做主观情绪推断） ──
+// 记录：这首歌一起听过几次 / 角色上次对它说过什么 / 角色提过几次切歌、被拒几次。
+// 这些会喂回 prompt，让角色的态度有连续性，而不是每首都像第一次听。
+
+const MOOD_KEY = "music-listen-together-mood-v1";
+registerKvMigration(MOOD_KEY);
+
+export type CharacterTrackMood = {
+    listens: number;        // 一起听会话里听到这首歌的次数
+    lastHeardAt: string;    // ISO
+    lastComments: string[]; // 角色对这首歌最近两句点评
+    skipWants: number;      // 角色对这首歌表达过想切的次数（含被拒的）
+    deniedSkips: number;    // 其中被用户拒绝的次数
+};
+
+type MoodStore = Record<string, Record<string, CharacterTrackMood>>; // characterId -> trackId -> mood
+
+const MOOD_ENTRY_CAP = 300;   // 全部角色的 角色×歌 条目上限
+const MOOD_COMMENT_KEEP = 2;  // 每对 角色×歌 保留的点评条数
+
+function loadMoodStore(): MoodStore {
+    if (typeof window === "undefined") return {};
+    try {
+        const raw = kvGet(MOOD_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+        return parsed as MoodStore;
+    } catch {
+        return {};
+    }
+}
+
+function saveMoodStore(store: MoodStore): void {
+    try {
+        // 展平后按 lastHeardAt 保留最新的 MOOD_ENTRY_CAP 条
+        const flat: Array<{ cid: string; tid: string; mood: CharacterTrackMood }> = [];
+        for (const [cid, byTrack] of Object.entries(store)) {
+            for (const [tid, mood] of Object.entries(byTrack)) {
+                flat.push({ cid, tid, mood });
+            }
+        }
+        if (flat.length > MOOD_ENTRY_CAP) {
+            flat.sort((a, b) => Date.parse(b.mood.lastHeardAt) - Date.parse(a.mood.lastHeardAt));
+            flat.length = MOOD_ENTRY_CAP;
+        }
+        const trimmed: MoodStore = {};
+        for (const { cid, tid, mood } of flat) {
+            (trimmed[cid] ??= {})[tid] = mood;
+        }
+        kvSet(MOOD_KEY, JSON.stringify(trimmed));
+    } catch { /* ignore */ }
+}
+
+function getMoodEntry(characterId: string, trackId: string): CharacterTrackMood | null {
+    return loadMoodStore()[characterId]?.[trackId] ?? null;
+}
+
+function updateMoodEntry(
+    characterId: string,
+    trackId: string,
+    patch: (mood: CharacterTrackMood) => CharacterTrackMood,
+): void {
+    const store = loadMoodStore();
+    const now = new Date().toISOString();
+    const prev = store[characterId]?.[trackId] ?? {
+        listens: 0, lastHeardAt: now, lastComments: [], skipWants: 0, deniedSkips: 0,
+    };
+    const next = patch(prev);
+    (store[characterId] ??= {})[trackId] = { ...next, lastHeardAt: now };
+    saveMoodStore(store);
+}
+
+/** 一起听会话里听到这首歌（每个 角色×歌 在一次会话内只应记一次，由调用方去重） */
+export function markListenHeard(characterIds: string[], trackId: string): void {
+    for (const cid of characterIds) {
+        updateMoodEntry(cid, trackId, m => ({ ...m, listens: m.listens + 1 }));
+    }
+}
+
+/** 角色对这首歌表达了想切（无论最终切没切） */
+export function markSkipWanted(characterId: string, trackId: string): void {
+    updateMoodEntry(characterId, trackId, m => ({ ...m, skipWants: m.skipWants + 1 }));
+}
+
+/** 用户拒绝了切歌提议（对本轮所有提议者记账） */
+export function markSkipDenied(characterIds: string[], trackId: string): void {
+    for (const cid of characterIds) {
+        updateMoodEntry(cid, trackId, m => ({ ...m, deniedSkips: m.deniedSkips + 1 }));
+    }
+}
+
+/** 把角色的"缘分"组装成 prompt 片段；第一次听这首歌时不占 token，返回空串 */
+function buildMoodBlock(character: Character, trackId: string): string {
+    const mood = getMoodEntry(character.id, trackId);
+    if (!mood) return "";
+    const lines: string[] = [];
+    if (mood.listens > 1) {
+        lines.push(`你和主人已经一起听过这首歌 ${mood.listens} 次了。`);
+    }
+    const lastComment = mood.lastComments[mood.lastComments.length - 1];
+    if (lastComment) {
+        lines.push(`你上次对它的评论是：「${lastComment}」`);
+    }
+    if (mood.deniedSkips > 0) {
+        lines.push(`你这歌提过 ${mood.skipWants} 次想切，被主人拒了 ${mood.deniedSkips} 次——这次除非真的忍不了，别再主动提。`);
+    }
+    if (lines.length === 0) return "";
+    return `【你和这首歌的缘分】\n${lines.join("\n")}`;
+}
+
+/** 切歌决策的额外倾向提示（只调语气，不替角色做决定） */
+function buildSkipBiasBlock(character: Character, trackId: string): string {
+    const mood = getMoodEntry(character.id, trackId);
+    if (!mood) return "";
+    const lines: string[] = [];
+    if (mood.listens >= 3) {
+        lines.push("听了这么多遍，腻了是正常的，想切不用不好意思。");
+    }
+    if (mood.deniedSkips > 0 && mood.deniedSkips >= mood.skipWants) {
+        lines.push("上次你提切歌被主人拒了，这次真没那么讨厌就别再提。");
+    }
+    return lines.join("\n");
+}
+
 // ── API config resolution ──
 
 /** 解析角色的 API 配置（沿用角色聊天绑定，取不到则抛可读错误） */
@@ -177,30 +309,74 @@ function buildTrackBrief(track: MusicTrack): string {
     return lines.join("\n");
 }
 
-/** 取出角色所属的世界观（名称 + 描述），没有则返回空串 */
-function buildWorldBlock(characterId: string): string {
-    const group = getCharacterWorldGroup(characterId);
-    if (!group) return "";
-    const name = group.name?.trim();
-    const desc = group.description?.trim();
-    if (!name && !desc) return "";
-    if (!desc) return `【世界观】\n${name}`;
-    return `【世界观】\n${name}\n${desc}`;
-}
-
 /**
- * 组装「一起听」的扮演上下文：世界观 + 角色人设 + 性格。
- * 这是沉浸感的关键——只喂歌名会让模型退化成客服腔。
+ * 组装「一起听」的扮演上下文：完整世界观+人物关系 + 角色人设 + 性格。
+ * 与聊天引擎同源（formatCharacterRelationsForPrompt），之前只喂世界观名称+描述
+ * 是角色退化成客服腔的根因。
  */
 function buildListenContext(character: Character): string {
     const parts: string[] = [];
-    const world = buildWorldBlock(character.id);
-    if (world) parts.push(world);
-    parts.push(`【角色人设】\n${character.persona?.trim() || "（暂无）"}`);
+    const relations = formatCharacterRelationsForPrompt(character.id);
+    if (relations) parts.push(`【你的世界与身边人】\n${relations}`);
+    parts.push(`【你是谁】\n${character.persona?.trim() || "（暂无）"}`);
     if (character.personality?.trim()) {
-        parts.push(`【性格】\n${character.personality.trim()}`);
+        parts.push(`【你的性格】\n${character.personality.trim()}`);
     }
     return parts.join("\n\n");
+}
+
+/** 和角色一起听歌的主人是谁——评论是对 TA 说的，得知道对方是谁 */
+function buildUserBlock(characterId: string): string {
+    const user = resolveUserIdentity(characterId, "chat");
+    const name = user?.name?.trim();
+    if (!user || (!name && !user.bio?.trim())) {
+        return "【和你一起听歌的人】\n坐在你身边听歌的，是你最亲近的主人。";
+    }
+    const lines: string[] = [];
+    if (name) lines.push(`称呼：${name}`);
+    if (user.gender?.trim()) lines.push(`性别：${user.gender.trim()}`);
+    if (user.occupation?.trim()) lines.push(`职业：${user.occupation.trim()}`);
+    if (user.bio?.trim()) lines.push(`近况：${user.bio.trim().slice(0, 200)}`);
+    return `【和你一起听歌的人】\n${lines.join("\n")}`;
+}
+
+const EMOTION_KEYWORDS: Array<{ label: string; pattern: RegExp }> = [
+    { label: "悲伤低落", pattern: /(悲伤|哭泣|眼泪|泪|伤心|孤独|寂寞|离别|失去|再也)/ },
+    { label: "欢快明亮", pattern: /(快乐|开心|欢笑|阳光|温暖|旅行|奔跑|恋爱|喜欢|心动)/ },
+    { label: "热血激昂", pattern: /(愤怒|战斗|燃烧|冲破|反抗|不屈|梦想|征服|绝不)/ },
+    { label: "温柔舒缓", pattern: /(温柔|轻抚|月光|星空|晚安|微风|宁静|守候)/ },
+    { label: "迷茫沉思", pattern: /(迷茫|徘徊|寻找|追问|困惑|为什么|意义|归途)/ },
+];
+
+/** 从歌词提取情绪基调；纯音乐/无歌词时明确告知，避免模型瞎引歌词 */
+function analyzeSongEmotion(track: MusicTrack): string {
+    const plain = (track.lyrics ?? "")
+        .replace(/\[\d+:\d+(?:[.:]\d+)?\]/g, "")
+        .trim();
+    if (!plain) {
+        return "没有歌词（纯音乐或歌词未加载），别引用歌词，凭曲名、歌手和旋律氛围来说感受。";
+    }
+    const hits = EMOTION_KEYWORDS
+        .filter(e => e.pattern.test(plain))
+        .map(e => e.label);
+    const base = hits.length > 0
+        ? `歌词整体透着${hits.join("、")}的情绪。`
+        : "歌词情绪不明显，偏叙事或抽象。";
+    const minutes = Math.max(1, Math.round((track.duration || 0) / 60));
+    return `${base}整首大约 ${minutes} 分钟。`;
+}
+
+/** 把本首歌已发生的弹幕作为对话上下文，角色才能接话茬而不是各说各的 */
+function buildRecentMessagesBlock(messages: ListenTogetherMessage[] | undefined, selfName: string): string {
+    const recent = (messages ?? []).filter(m => m.content?.trim()).slice(-4);
+    if (recent.length === 0) return "";
+    const lines = recent.map(m =>
+        m.characterName === selfName ? `你（刚才）：${m.content}` : `${m.characterName}：${m.content}`);
+    return [
+        `【刚才飘过的弹幕】`,
+        ...lines,
+        "你可以顺着谁的话茬接一句、抬个杠，也可以只管自己吐槽，别像没听见一样每句都从头评价歌曲。",
+    ].join("\n");
 }
 
 function ensureContent(result: { error?: string; content?: string | null }): string {
@@ -214,8 +390,17 @@ function ensureContent(result: { error?: string; content?: string | null }): str
 
 // ── LLM tasks ──
 
-/** 角色对当前歌曲发表一句听感评价（沉浸扮演，会带上世界观与人设） */
-export async function generateListenComment(character: Character, track: MusicTrack): Promise<string> {
+export type ListenCommentContext = {
+    /** 本首歌已发生的一起听弹幕（含角色自己的和别人的），用于接话 */
+    recentMessages?: ListenTogetherMessage[];
+};
+
+/** 角色对当前歌曲发表一句听感评价（沉浸扮演：完整世界观 + 人设 + 主人信息 + 弹幕上下文） */
+export async function generateListenComment(
+    character: Character,
+    track: MusicTrack,
+    ctx?: ListenCommentContext,
+): Promise<string> {
     if (!character.persona?.trim() && !character.personality?.trim()) {
         throw new Error("角色还没有设定内容，先填写人设");
     }
@@ -223,25 +408,32 @@ export async function generateListenComment(character: Character, track: MusicTr
     const name = character.name?.trim() || "该角色";
 
     const systemPrompt = [
-        `你是角色「${name}」，正和你的主人（用户）一起用这台小手机听歌。请完全沉浸到你所属的世界观与自身人设里，用第一人称、口语、符合你性格的方式，对正在播放的歌曲说一句听感。`,
+        `你是「${name}」，此刻正和主人一起窝着用这台小手机放歌听，这不是任务，就是你们俩的日常。`,
         "",
         buildListenContext(character),
         "",
-        "【输出要求】",
-        "- 这就是你这个角色本人在随口点评，不是客服、不是乐评人；别用「为您」「为您推荐」这类客套",
-        "- 可以自然地把歌曲和你的世界观、你认识的人、你的经历关联起来（但别生硬硬塞）",
-        "- 1~2 句话，像发弹幕一样短而自然；可以提到歌名、歌手、歌词意象或曲风",
-        "- 只输出这句点评本身：不要加角色名前缀、不要加引号、不要写任何解释或括号说明",
-    ].join("\n");
+        buildUserBlock(character.id),
+        "",
+        `【正在放的歌】\n${buildTrackBrief(track)}`,
+        analyzeSongEmotion(track),
+        buildMoodBlock(character, track.id),
+        "",
+        buildRecentMessagesBlock(ctx?.recentMessages, name),
+        "",
+        "想到什么就随口冒一句什么，1~2 句，像发弹幕一样短。",
+        "可以哼半句旋律、可以扯到你自己经历或世界观里的事、可以只对主人说话、也可以懒得评价只是叹口气；",
+        "别用「为您」「值得一听」这种乐评腔，别每句都在总结歌曲。",
+        "只输出这句话本身：不要角色名前缀、不要引号、不要括号说明。",
+    ].filter(line => line !== null).join("\n");
 
     const result = await simpleLLMCall(
         apiConfig,
         [
             { role: "system", content: systemPrompt },
-            { role: "user", content: `正在播放的歌曲：\n${buildTrackBrief(track)}` },
+            { role: "user", content: "（音乐正在播放，你说一句。）" },
         ],
         // 思考模型会先烧隐藏思考 token，max_tokens 给足余量避免正文被截空
-        { temperature: 0.85, max_tokens: 2048 },
+        { temperature: 0.95, max_tokens: 2048 },
     );
     return ensureContent(result);
 }
@@ -252,7 +444,11 @@ export type SkipDecision = {
 };
 
 /** 角色自主决定是否切歌（LLM 输出 JSON），reason 即切歌/留歌的理由评价 */
-export async function decideListenSkip(character: Character, track: MusicTrack): Promise<SkipDecision> {
+export async function decideListenSkip(
+    character: Character,
+    track: MusicTrack,
+    ctx?: ListenCommentContext,
+): Promise<SkipDecision> {
     if (!character.persona?.trim() && !character.personality?.trim()) {
         throw new Error("角色还没有设定内容，先填写人设");
     }
@@ -260,14 +456,22 @@ export async function decideListenSkip(character: Character, track: MusicTrack):
     const name = character.name?.trim() || "该角色";
 
     const systemPrompt = [
-        `你是角色「${name}」，正和主人一起听歌。请完全按你的人设与世界观判断：这首歌听到现在，你想不想切到下一首？`,
+        `你是「${name}」，正和主人一起用这台小手机听歌，马上要放到下一首了。`,
         "",
         buildListenContext(character),
         "",
-        "【输出要求】",
-        `- 想切歌：{\"skip\": true, \"reason\": \"一句符合你人设与世界观的、想切这首歌的理由/吐槽，第一人称口语\"}`,
-        `- 想继续听：{\"skip\": false, \"reason\": \"一句符合你人设的、想留着这首歌的话\"}`,
-        "- reason 用第一人称口语，2 句以内，可以结合世界观里的设定或你的喜好",
+        buildUserBlock(character.id),
+        "",
+        `【正在放的歌】\n${buildTrackBrief(track)}`,
+        analyzeSongEmotion(track),
+        buildMoodBlock(character, track.id),
+        buildSkipBiasBlock(character, track.id),
+        "",
+        buildRecentMessagesBlock(ctx?.recentMessages, name),
+        "",
+        "按你自己的真实喜好决定：这首歌你还想继续听，还是想换下一首？别考虑「客观上」好不好听，就想你自己此刻想不想听。",
+        `- 想切歌：{"skip": true, "reason": "你为什么想切，第一人称口语，2句以内"}`,
+        `- 想继续听：{"skip": false, "reason": "你想留着它的理由，第一人称口语，2句以内"}`,
         "- 只输出 JSON 本身，不要输出任何其他内容",
     ].join("\n");
 
@@ -275,9 +479,9 @@ export async function decideListenSkip(character: Character, track: MusicTrack):
         apiConfig,
         [
             { role: "system", content: systemPrompt },
-            { role: "user", content: `正在播放的歌曲：\n${buildTrackBrief(track)}` },
+            { role: "user", content: "（下一首要来了，切还是留？）" },
         ],
-        { temperature: 0.7, max_tokens: 2048 },
+        { temperature: 0.8, max_tokens: 2048 },
     );
     const text = ensureContent(result);
 
