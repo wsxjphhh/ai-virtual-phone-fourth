@@ -5755,3 +5755,190 @@
 .mp-top-btn[data-active] {
     color: var(--c-music-accent);
 }
+
+/* ── 操作同步提示：顶部通知条（双方头像交叠+爱心）── */
+.lt-notice {
+    position: absolute;
+    top: calc(var(--page-header-safe-top, 48px) + 2px);
+    left: 8px;
+    right: 8px;
+    z-index: 76;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px 9px 10px;
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--c-music-surface) 90%, transparent);
+    border: 1px solid var(--c-music-surface-solid);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.22);
+    pointer-events: auto;
+    animation: lt-notice-in 0.28s var(--ease-out);
+}
+
+@keyframes lt-notice-in {
+    from { opacity: 0; transform: translateY(-14px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.lt-notice-avas {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.lt-notice-ava {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--c-music-accent-dim);
+    border: 2px solid var(--c-music-surface-solid);
+    flex-shrink: 0;
+}
+
+.lt-notice-ava img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.lt-notice-ava i {
+    font-style: normal;
+    font-size: calc(11.7px*var(--app-text-scale,1));
+    font-weight: 700;
+    color: var(--c-music-accent);
+}
+
+/* 角色头像压住用户头像一侧，形成"双方"交叠 */
+.lt-notice-ava-char {
+    margin-left: -8px;
+}
+
+.lt-notice-heart {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--c-music-accent);
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+    animation: lt-heart-beat 1.4s ease-in-out infinite;
+}
+
+@keyframes lt-heart-beat {
+    0%, 100% { transform: translate(-50%, -50%) scale(1); }
+    20% { transform: translate(-50%, -50%) scale(1.18); }
+    40% { transform: translate(-50%, -50%) scale(1); }
+}
+
+.lt-notice-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.lt-notice-body b {
+    font-size: calc(12.6px*var(--app-text-scale,1));
+    color: var(--c-music-text);
+}
+
+.lt-notice-body span {
+    font-size: calc(10.8px*var(--app-text-scale,1));
+    line-height: 1.35;
+    color: color-mix(in srgb, var(--c-music-text) 62%, transparent);
+}
+
+/* 通知条收起后，头部下留一行灰字提示 */
+.lt-subtitle {
+    position: absolute;
+    top: calc(var(--page-header-safe-top, 48px) + 94px);
+    left: 12px;
+    z-index: 74;
+    font-size: calc(10.8px*var(--app-text-scale,1));
+    color: color-mix(in srgb, var(--c-music-text) 58%, transparent);
+    pointer-events: none;
+    animation: lt-fade 0.3s var(--ease-out);
+}
+
+/* ── 首次进入一起听的操作同步说明（bottom sheet）── */
+.lt-intro-mask {
+    position: absolute;
+    inset: 0;
+    z-index: 86;
+    display: flex;
+    align-items: flex-end;
+    background: rgba(0, 0, 0, 0.5);
+    pointer-events: auto;
+    animation: lt-fade 0.22s var(--ease-out);
+}
+
+.lt-intro-card {
+    width: 100%;
+    padding: 26px 20px calc(22px + env(safe-area-inset-bottom, 0px));
+    border-radius: 26px 26px 0 0;
+    background: var(--c-music-surface);
+    border-top: 1px solid var(--c-music-surface-solid);
+    box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    animation: lt-intro-up 0.3s var(--ease-out);
+}
+
+@keyframes lt-intro-up {
+    from { opacity: 0; transform: translateY(40px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.lt-intro-avas .lt-notice-ava {
+    width: 40px;
+    height: 40px;
+}
+
+.lt-intro-avas .lt-notice-ava-char {
+    margin-left: -10px;
+}
+
+.lt-intro-avas .lt-notice-ava i {
+    font-size: calc(16px*var(--app-text-scale,1));
+}
+
+.lt-intro-avas .lt-notice-heart {
+    left: calc(50% + 1px);
+}
+
+.lt-intro-title {
+    margin-top: 16px;
+    font-size: calc(17px*var(--app-text-scale,1));
+    font-weight: 700;
+    color: var(--c-music-text);
+}
+
+.lt-intro-desc {
+    margin: 8px 0 22px;
+    font-size: calc(12.6px*var(--app-text-scale,1));
+    line-height: 1.6;
+    text-align: center;
+    color: color-mix(in srgb, var(--c-music-text) 66%, transparent);
+}
+
+.lt-intro-btn {
+    width: 100%;
+    padding: 14px 0;
+    border: none;
+    border-radius: 24px;
+    background: var(--c-music-accent);
+    color: #fff;
+    font-size: calc(14px*var(--app-text-scale,1));
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.lt-intro-btn:active {
+    transform: scale(0.98);
+}

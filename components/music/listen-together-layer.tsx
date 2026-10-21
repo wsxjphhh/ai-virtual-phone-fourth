@@ -19,8 +19,14 @@ import {
     markSkipWanted,
     markSkipDenied,
     isListenDuplicate,
+    resolveUserLabel,
+    resolveUserAvatar,
+    hasSeenListenNotice,
+    markListenNoticeSeen,
+    LISTEN_USER_ACTION_EVENT,
     type ListenSkipEvent,
     type ListenTogetherMessage,
+    type ListenUserAction,
 } from "@/lib/music-listen-together";
 
 type Bubble = {
@@ -55,6 +61,10 @@ const AUTO_EVAL_GAP_MS = 45000; // 自动切歌评估最小间隔
 const DENY_COOLDOWN_MS = 180000; // 用户拒绝提议后的冷却
 const SKIP_PROBABILITY = 0.22; // 每次调度 tick 转为切歌评估的概率
 const AUTO_SKIP_DENY_LIMIT = 3; // 同一会话被拒满3次，本次不再自动提议切歌
+const NOTICE_TTL = 5000;     // 网易云样式通知条停留时长
+const SUBTITLE_TTL = 8000;   // 头部下方灰字副标题停留时长
+const USER_ACTION_TTL = 90_000; // 用户操作可被角色引用的新鲜期
+const SYNC_NOTICE_DESC = "一起听时，双方的切歌、暂停、快进等操作都会同步";
 
 function randomBetween(min: number, max: number): number {
     const lo = Math.min(min, max);
@@ -83,6 +93,10 @@ export default function ListenTogetherLayer({
     const [busyAll, setBusyAll] = useState(false);
     const [busySkip, setBusySkip] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    // 操作同步提示（网易云样式）：角色切歌后的顶部通知条 + 头部下灰字副标题 + 首次说明弹窗
+    const [notice, setNotice] = useState<{ character: Character; title: string } | null>(null);
+    const [subtitle, setSubtitle] = useState<string | null>(null);
+    const [introOpen, setIntroOpen] = useState(false);
 
     // 最新值用 ref 暴露给随机调度器，避免闭包过期
     const charsRef = useRef<Character[]>([]);
@@ -108,6 +122,16 @@ export default function ListenTogetherLayer({
     const lastSkipEventRef = useRef<ListenSkipEvent | null>(null);
     const skipEchoLeftRef = useRef(0);
     const firstSpeakerRef = useRef<string | null>(null);
+    // 用户对播放器的操作（切歌/暂停/快进）：只攒上下文，随下一次 LLM 调用消费掉
+    const userActionsRef = useRef<Array<{ action: ListenUserAction; at: number }>>([]);
+    const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const subtitleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // 通知条要摆"双方头像"：用户侧取主人身份设置的头像/称呼（与角色 prompt 同源）
+    const userInfoRef = useRef<{ label: string; avatar: string | null } | null>(null);
+    if (!userInfoRef.current) {
+        const cid = characterIds[0] ?? "";
+        userInfoRef.current = { label: resolveUserLabel(cid), avatar: resolveUserAvatar(cid) };
+    }
 
     useEffect(() => {
         mountedRef.current = true;
@@ -143,6 +167,47 @@ export default function ListenTogetherLayer({
         }
         markListenHeard(characterIds, track.id);
     }, [track.id, characterIds]);
+
+    // 首次开一起听：弹一次"操作同步"说明（网易云同款 bottom sheet），本地记一次性标记
+    useEffect(() => {
+        if (!hasSeenListenNotice()) setIntroOpen(true);
+    }, []);
+
+    // 订阅播放器操作事件（music-player 在切歌/暂停/快进的按钮路径上派发）
+    useEffect(() => {
+        const onAction = (e: Event) => {
+            const action = (e as CustomEvent<{ action: ListenUserAction }>).detail?.action;
+            if (!action) return;
+            const now = Date.now();
+            userActionsRef.current = [...userActionsRef.current, { action, at: now }]
+                .filter(a => now - a.at <= USER_ACTION_TTL)
+                .slice(-5);
+        };
+        window.addEventListener(LISTEN_USER_ACTION_EVENT, onAction);
+        return () => window.removeEventListener(LISTEN_USER_ACTION_EVENT, onAction);
+    }, []);
+
+    // 角色切歌 → 顶部通知条 + 副标题；用户自己的操作不弹条（会被动地让角色知道）
+    const showSkipNotice = useCallback((character: Character) => {
+        const title = `${character.name || "角色"}刚刚切歌了`;
+        setNotice({ character, title });
+        setSubtitle(title);
+        if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+        if (subtitleTimerRef.current) clearTimeout(subtitleTimerRef.current);
+        noticeTimerRef.current = setTimeout(() => {
+            if (mountedRef.current) setNotice(null);
+        }, NOTICE_TTL);
+        subtitleTimerRef.current = setTimeout(() => {
+            if (mountedRef.current) setSubtitle(null);
+        }, SUBTITLE_TTL);
+    }, []);
+
+    // 取走并清空待消费的用户操作（喂给马上要发起的 LLM 调用，不重放）
+    const takeUserActions = useCallback(() => {
+        const actions = userActionsRef.current.slice();
+        userActionsRef.current = [];
+        return actions;
+    }, []);
 
     const pushBubble = useCallback((character: Character, text: string, action: Bubble["action"]): number => {
         const key = ++keyRef.current;
@@ -184,18 +249,20 @@ export default function ListenTogetherLayer({
             skipEchoLeftRef.current -= 1;
         }
         let avoid: string[] | undefined;
+        const userActions = takeUserActions();
         for (let attempt = 0; attempt < 2; attempt++) {
             const text = await generateListenComment(character, trackRef.current, {
                 recentMessages,
                 elapsed: currentTimeRef.current,
                 justSkipped,
                 avoid,
+                userActions,
             });
             if (!isListenDuplicate(text, recentTexts)) return text;
             avoid = [text];
         }
         return null;
-    }, []);
+    }, [takeUserActions]);
 
     // 收到一张"想切"票后按人数决定打扰方式：
     // manual（用户主动点按钮）必弹窗；自动则凑够阈值才弹窗，
@@ -229,7 +296,10 @@ export default function ListenTogetherLayer({
         askedRef.current.add(character.id);
         try {
             const recentMessages = loadListenHistory(trackRef.current.id);
-            const decision = await decideListenSkip(character, trackRef.current, { recentMessages });
+            const decision = await decideListenSkip(character, trackRef.current, {
+                recentMessages,
+                userActions: takeUserActions(),
+            });
             if (!mountedRef.current) return;
             if (decision.skip) {
                 applySkipVote(character, decision.reason || "想换一首", manual);
@@ -239,7 +309,7 @@ export default function ListenTogetherLayer({
         } catch {
             if (manual) setError("TA 没有回应，可能还没配置 API 或人设");
         }
-    }, [applySkipVote, onToast]);
+    }, [applySkipVote, onToast, takeUserActions]);
 
     // 单个角色冒一句点评（自动调度用，失败静默）
     const speakOne = useCallback(async () => {
@@ -295,6 +365,8 @@ export default function ListenTogetherLayer({
         scheduleNext();
         return () => {
             if (scheduleTimerRef.current) clearTimeout(scheduleTimerRef.current);
+            if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+            if (subtitleTimerRef.current) clearTimeout(subtitleTimerRef.current);
         };
     }, [scheduleNext, track.id]);
 
@@ -346,8 +418,9 @@ export default function ListenTogetherLayer({
         pushBubble(first.character, `（切歌）${ps.proposers.map(p => p.reason).join(" / ")}`, "skip");
         recordHistory(first.character, "skip", ps.proposers.map(p => p.reason).join(" / "));
         setPendingSkip(null);
+        showSkipNotice(first.character);
         onSkip();
-    }, [pushBubble, recordHistory, onSkip]);
+    }, [pushBubble, recordHistory, onSkip, showSkipNotice]);
 
     const handleDenySkip = useCallback(() => {
         // 被拒绝了就消停一会儿：3分钟冷却，本首歌的票作废
@@ -380,11 +453,40 @@ export default function ListenTogetherLayer({
         };
         pushBubble(proposal.character, `（切歌）${proposal.reason}`, "skip");
         recordHistory(proposal.character, "skip", proposal.reason);
+        showSkipNotice(proposal.character);
         onSkip();
-    }, [pushBubble, recordHistory, onSkip]);
+    }, [pushBubble, recordHistory, onSkip, showSkipNotice]);
 
     return (
         <div className="lt-layer">
+            {/* 操作同步通知条（网易云样式，双方头像交叠+爱心；出现 5s 自动收起，可点掉） */}
+            {notice && (
+                <div className="lt-notice" onClick={() => setNotice(null)}>
+                    <span className="lt-notice-avas">
+                        <span className="lt-notice-ava">
+                            {userInfoRef.current?.avatar
+                                ? <img src={userInfoRef.current.avatar} alt="" />
+                                : <i>{(userInfoRef.current?.label || "?").slice(0, 1)}</i>}
+                        </span>
+                        <span className="lt-notice-ava lt-notice-ava-char">
+                            {notice.character.avatar
+                                ? <img src={notice.character.avatar} alt="" />
+                                : <i>{(notice.character.name || "?").slice(0, 1)}</i>}
+                        </span>
+                        <svg className="lt-notice-heart" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M12 21s-7.5-4.9-10-9.3C.4 8.6 2.4 5 6 5c2.2 0 3.8 1.2 6 3.5C14.2 6.2 15.8 5 18 5c3.6 0 5.6 3.6 4 6.7C19.5 16.1 12 21 12 21z" />
+                        </svg>
+                    </span>
+                    <span className="lt-notice-body">
+                        <b>{notice.title}</b>
+                        <span>{SYNC_NOTICE_DESC}</span>
+                    </span>
+                </div>
+            )}
+
+            {/* 头部下灰字副标题：通知条收起后仍留一会儿"谁切的歌" */}
+            {subtitle && !notice && <div className="lt-subtitle">{subtitle}</div>}
+
             {/* 实时控制条（左上，不挡播放器主体交互） */}
             <div className="lt-live-bar">
                 <span className="lt-live-dot" />
@@ -453,6 +555,40 @@ export default function ListenTogetherLayer({
                     </div>
                 </div>
             )}
+
+            {/* 首次说明弹窗（bottom sheet）：双头像 + 同步规则说明，点「知道了」记一次性标记 */}
+            {introOpen && (() => {
+                const introChar = notice?.character ?? charsRef.current[0] ?? null;
+                return (
+                <div className="lt-intro-mask" onClick={() => { markListenNoticeSeen(); setIntroOpen(false); }}>
+                    <div className="lt-intro-card" onClick={e => e.stopPropagation()}>
+                        <span className="lt-notice-avas lt-intro-avas">
+                            <span className="lt-notice-ava">
+                                {userInfoRef.current?.avatar
+                                    ? <img src={userInfoRef.current.avatar} alt="" />
+                                    : <i>{(userInfoRef.current?.label || "?").slice(0, 1)}</i>}
+                            </span>
+                            <span className="lt-notice-ava lt-notice-ava-char">
+                                {introChar?.avatar
+                                    ? <img src={introChar.avatar} alt="" />
+                                    : <i>{(introChar?.name || "?").slice(0, 1)}</i>}
+                            </span>
+                            <svg className="lt-notice-heart" width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                                <path d="M12 21s-7.5-4.9-10-9.3C.4 8.6 2.4 5 6 5c2.2 0 3.8 1.2 6 3.5C14.2 6.2 15.8 5 18 5c3.6 0 5.6 3.6 4 6.7C19.5 16.1 12 21 12 21z" />
+                            </svg>
+                        </span>
+                        <div className="lt-intro-title">一起听</div>
+                        <p className="lt-intro-desc">{SYNC_NOTICE_DESC}</p>
+                        <button
+                            className="lt-intro-btn"
+                            onClick={() => { markListenNoticeSeen(); setIntroOpen(false); }}
+                        >
+                            知道了
+                        </button>
+                    </div>
+                </div>
+                );
+            })()}
         </div>
     );
 }

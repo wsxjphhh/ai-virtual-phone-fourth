@@ -18,7 +18,7 @@ import MusicCommentsPage from "./music-comments";
 import MusicArtistPage from "./music-artist";
 import ListenTogetherPanel from "./listen-together-panel";
 import ListenTogetherLayer from "./listen-together-layer";
-import { loadListenSession, saveListenSession, type ListenSession } from "@/lib/music-listen-together";
+import { emitListenUserAction, loadListenSession, saveListenSession, type ListenSession } from "@/lib/music-listen-together";
 import { loadMusicBg, playerBgStyle, MUSIC_BG_EVENT, type MusicBgConfig } from "@/lib/music-bg";
 
 const PLAY_MODE_ICONS: Record<PlayMode, { svg: string; label: string }> = {
@@ -211,6 +211,7 @@ export default function MusicPlayer() {
         const time = getTimeFromEvent(e.clientX);
         setDragTime(time);
         player.seek(time);
+        emitListenUserAction("seek");
         setIsDragging(false);
     }, [isDragging, getTimeFromEvent, player]);
 
@@ -276,7 +277,10 @@ export default function MusicPlayer() {
     const handleLyricClick = useCallback((idx: number, e: React.MouseEvent) => {
         e.stopPropagation();
         const line = parsedLyrics.current[idx];
-        if (line) player.seek(line.time);
+        if (line) {
+            player.seek(line.time);
+            emitListenUserAction("seek");
+        }
     }, [player]);
 
     const [liked, setLiked] = useState(false);
@@ -596,12 +600,12 @@ export default function MusicPlayer() {
                 <button className="music-player-ctrl-btn mp-ctrl-side" onClick={cyclePlayMode} title={modeInfo.label}>
                     <svg width="20" height="20" viewBox="0 0 24 24" dangerouslySetInnerHTML={{ __html: modeInfo.svg }} />
                 </button>
-                <button className="music-player-ctrl-btn mp-ctrl" onClick={handlePrev}>
+                <button className="music-player-ctrl-btn mp-ctrl" onClick={() => { emitListenUserAction("skip"); handlePrev(); }}>
                     <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
                     </svg>
                 </button>
-                <button className="music-player-ctrl-btn mp-ctrl-play" onClick={player.togglePlay}>
+                <button className="music-player-ctrl-btn mp-ctrl-play" onClick={() => { emitListenUserAction(player.isPlaying ? "pause" : "play"); player.togglePlay(); }}>
                     {player.isPlaying ? (
                         <svg width="30" height="30" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M6 4h4v16H6zm8 0h4v16h-4z" />
@@ -612,7 +616,7 @@ export default function MusicPlayer() {
                         </svg>
                     )}
                 </button>
-                <button className="music-player-ctrl-btn mp-ctrl" onClick={handleNext}>
+                <button className="music-player-ctrl-btn mp-ctrl" onClick={() => { emitListenUserAction("skip"); handleNext(); }}>
                     <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M6 18l8.5-6L6 6v12zm8.5 0h2V6h-2v12z" />
                     </svg>

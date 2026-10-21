@@ -422,8 +422,13 @@ function buildListenContext(character: Character, userLabel: string): string {
 }
 
 /** 身边这个人叫什么：优先主人设定的真名；绝不使用"主人"这种人称谓 */
-function resolveUserLabel(characterId: string): string {
+export function resolveUserLabel(characterId: string): string {
     return resolveUserIdentity(characterId, "chat")?.name?.trim() || "你身边的人";
+}
+
+/** 身边这个人的头像（一起听通知条要摆双方头像）；没设置则 null，UI 用首字兜底 */
+export function resolveUserAvatar(characterId?: string): string | null {
+    return resolveUserIdentity(characterId, "chat")?.avatarUrl?.trim() || null;
 }
 
 /** 和角色一起听歌的人是谁——评论是对 TA 说的，得知道对方是谁 */
@@ -568,7 +573,50 @@ export type ListenCommentContext = {
     justSkipped?: ListenSkipEvent;
     /** 上一稿被判复读，重试时把这些也拉进黑名单 */
     avoid?: string[];
+    /** 主人刚才对播放器的操作（切歌/暂停/快进），只喂上下文、不独立调 LLM */
+    userActions?: Array<{ action: ListenUserAction; at: number }>;
 };
+
+// ── 用户操作事件：播放器 → 一起听层 ──
+// 网易云式"操作同步"的本地映射：角色的操作弹通知条给用户；用户的操作只作为
+// 事件记下来，喂进角色下一次发言/切歌评估的上下文，不为它单独花一次 token。
+
+export type ListenUserAction = "skip" | "pause" | "play" | "seek";
+
+export const LISTEN_USER_ACTION_EVENT = "ai-listen-user-action";
+
+export function emitListenUserAction(action: ListenUserAction): void {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new CustomEvent(LISTEN_USER_ACTION_EVENT, { detail: { action } }));
+}
+
+const USER_ACTION_LABEL: Record<ListenUserAction, string> = {
+    skip: "切了歌", pause: "按了暂停", play: "点了继续播放", seek: "拖了进度条",
+};
+
+/** 把主人最近的操作组装成 prompt 片段；90 秒内最多三条，过期自动不占 token */
+export function buildUserActionsBlock(
+    actions?: Array<{ action: ListenUserAction; at: number }>,
+): string {
+    const fresh = (actions ?? []).filter(a => Date.now() - a.at < 90_000).slice(-3);
+    if (fresh.length === 0) return "";
+    const text = fresh.map(a => USER_ACTION_LABEL[a.action] ?? "动了动播放器").join("、");
+    return `【身边这人刚才的小动作】\nTA刚才${text}。可以自然地接一句，别大惊小怪，也别假装看见你没看到的东西。`;
+}
+
+// ── 首次启动「操作同步」说明弹窗（一次性，本地标记） ──
+
+const NOTICE_SEEN_KEY = "music-listen-together-notice-seen-v1";
+registerKvMigration(NOTICE_SEEN_KEY);
+
+export function hasSeenListenNotice(): boolean {
+    if (typeof window === "undefined") return true;
+    try { return kvGet(NOTICE_SEEN_KEY) === "1"; } catch { return true; }
+}
+
+export function markListenNoticeSeen(): void {
+    try { kvSet(NOTICE_SEEN_KEY, "1"); } catch { /* ignore */ }
+}
 
 /** 角色对当前歌曲发表一句听感评价（沉浸扮演：完整世界观 + 人设 + 主人信息 + 弹幕上下文） */
 export async function generateListenComment(
@@ -602,6 +650,7 @@ export async function generateListenComment(
         "",
         buildRecentMessagesBlock(recent, name),
         buildEchoBlock(selfSaid, ctx?.avoid ?? []),
+        buildUserActionsBlock(ctx?.userActions),
         "",
         "想到什么就随口冒一句什么，1~2 句，像发弹幕一样短。",
         "只聊此刻正在放的这首歌、你听它的感受、或你和身边这个人的一句话；",
@@ -657,6 +706,7 @@ export async function decideListenSkip(
         "",
         buildRecentMessagesBlock(recent, name),
         buildEchoBlock(selfSaid, []),
+        buildUserActionsBlock(ctx?.userActions),
         "",
         "按你自己的真实喜好决定：这首歌你还想继续听，还是想换下一首？别考虑「客观上」好不好听，就想你自己此刻想不想听。",
         `- 想切歌：{"skip": true, "reason": "你为什么想切，第一人称口语，2句以内"}`,
