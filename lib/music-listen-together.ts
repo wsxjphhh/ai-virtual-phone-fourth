@@ -318,10 +318,13 @@ function buildListenContext(character: Character): string {
     const parts: string[] = [];
     const relations = formatCharacterRelationsForPrompt(character.id);
     if (relations) parts.push(`【你的世界与身边人】\n${relations}`);
-    parts.push(`【你是谁】\n${character.persona?.trim() || "（暂无）"}`);
+    // 人设截断：聊天人设动辄几千字且混着输出格式规则，全量注入既烧 token 又带偏格式
+    const persona = (character.persona?.trim() || "（暂无）").slice(0, 1200);
+    parts.push(`【你是谁】\n${persona}`);
     if (character.personality?.trim()) {
-        parts.push(`【你的性格】\n${character.personality.trim()}`);
+        parts.push(`【你的性格】\n${character.personality.trim().slice(0, 300)}`);
     }
+    parts.push("注意：人设里若写了卡片、标签、markdown、回复格式等聊天输出规则，在这里全部无效——此刻你不是在回消息，只是在听歌时随口说话。");
     return parts.join("\n\n");
 }
 
@@ -388,6 +391,34 @@ function ensureContent(result: { error?: string; content?: string | null }): str
     return text;
 }
 
+const BUBBLE_MAX_CHARS = 80;
+
+/**
+ * 弹幕出口硬约束：剥掉卡片/富媒体标签与 markdown，压成一行短句。
+ * prompt 约束挡不住被聊天格式带偏的模型，长度和格式必须在代码层兜底，
+ * 否则一条气泡能刷满半屏挡住播放器。
+ */
+export function sanitizeListenText(raw: string): string {
+    let t = raw
+        .replace(/```[\s\S]*?```/g, " ")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/^\s*#{1,6}\s*.*$/gm, " ")
+        .replace(/^\s*[-*+]\s+/gm, "")
+        .replace(/(\*\*|__)/g, "")
+        .replace(/[*`~]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (t.length > BUBBLE_MAX_CHARS) {
+        const cut = t.slice(0, BUBBLE_MAX_CHARS);
+        const stop = Math.max(
+            cut.lastIndexOf("。"), cut.lastIndexOf("！"), cut.lastIndexOf("？"),
+            cut.lastIndexOf("；"), cut.lastIndexOf("…"),
+        );
+        t = stop >= 24 ? cut.slice(0, stop + 1) : `${cut.trimEnd()}…`;
+    }
+    return t;
+}
+
 // ── LLM tasks ──
 
 export type ListenCommentContext = {
@@ -435,7 +466,7 @@ export async function generateListenComment(
         // 思考模型会先烧隐藏思考 token，max_tokens 给足余量避免正文被截空
         { temperature: 0.95, max_tokens: 2048 },
     );
-    return ensureContent(result);
+    return sanitizeListenText(ensureContent(result));
 }
 
 export type SkipDecision = {
@@ -497,9 +528,9 @@ export async function decideListenSkip(
     }
     if (parsed && typeof parsed === "object") {
         const obj = parsed as { skip?: unknown; reason?: unknown };
-        const reason = typeof obj.reason === "string" ? obj.reason.trim() : "";
+        const reason = typeof obj.reason === "string" ? sanitizeListenText(obj.reason.trim()) : "";
         return { skip: obj.skip === true, reason };
     }
     // 模型没按 JSON 输出：把原文当理由，默认不切歌（避免误切）
-    return { skip: false, reason: text.slice(0, 60) };
+    return { skip: false, reason: sanitizeListenText(text) };
 }

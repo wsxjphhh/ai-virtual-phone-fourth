@@ -5557,6 +5557,8 @@
     font-size: calc(11.5px*var(--app-text-scale,1));
     font-weight: 700;
     cursor: pointer;
+    /* .lt-danmaku 整层是 pointer-events:none（不挡播放器），按钮要单独恢复可点 */
+    pointer-events: auto;
 }
 
 .lt-bubble-skip-btn:active {
@@ -5612,6 +5614,11 @@
     color: var(--c-music-text);
     word-break: break-word;
     white-space: pre-wrap;
+    /* 出口清洗之外再兜一层：再长的文本也只占 3 行 */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 /* 切歌确认弹窗 */
