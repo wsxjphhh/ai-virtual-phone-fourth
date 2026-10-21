@@ -5513,7 +5513,9 @@
 .lt-danmaku {
     position: absolute;
     right: 8px;
-    bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+    /* 底部控件栈实测高约175px（波形+时间≈53、控制行≈74、社交行≈72，不含安全区），
+       150px 会压住波形进度条，抬到 196px 留出封面下沿呼吸位 */
+    bottom: calc(196px + env(safe-area-inset-bottom, 0px));
     display: flex;
     flex-direction: column;
     align-items: flex-end;

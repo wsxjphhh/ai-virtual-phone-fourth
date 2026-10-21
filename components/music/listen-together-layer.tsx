@@ -63,8 +63,16 @@ const SKIP_PROBABILITY = 0.22; // 每次调度 tick 转为切歌评估的概率
 const AUTO_SKIP_DENY_LIMIT = 3; // 同一会话被拒满3次，本次不再自动提议切歌
 const NOTICE_TTL = 5000;     // 网易云样式通知条停留时长
 const SUBTITLE_TTL = 8000;   // 头部下方灰字副标题停留时长
+const ERROR_TTL = 5000;      // 错误提示自动收起，不该赖在屏幕上等用户手动关
 const USER_ACTION_TTL = 90_000; // 用户操作可被角色引用的新鲜期
 const SYNC_NOTICE_DESC = "一起听时，双方的切歌、暂停、快进等操作都会同步";
+
+/** 失败原因直接取自异常本身，截断即可用；空 message 兜底成异常类型名 */
+function briefError(e: unknown): string {
+    const raw = e instanceof Error ? e.message : String(e ?? "");
+    const text = raw.trim() || e?.constructor?.name || "未知错误";
+    return text.length > 40 ? `${text.slice(0, 40)}…` : text;
+}
 
 function randomBetween(min: number, max: number): number {
     const lo = Math.min(min, max);
@@ -286,6 +294,13 @@ export default function ListenTogetherLayer({
         }
     }, [pushBubble, recordHistory]);
 
+    // 错误提示只作瞬时反馈：5s 自动收起，不用手动关
+    useEffect(() => {
+        if (!error) return;
+        const t = setTimeout(() => setError(null), ERROR_TTL);
+        return () => clearTimeout(t);
+    }, [error]);
+
     // 问一个（本首歌还没问过的）角色想不想切歌
     const evaluateSkip = useCallback(async (manual: boolean) => {
         const chars = charsRef.current;
@@ -306,8 +321,9 @@ export default function ListenTogetherLayer({
             } else if (manual) {
                 onToast?.("TA 想继续听这首");
             }
-        } catch {
-            if (manual) setError("TA 没有回应，可能还没配置 API 或人设");
+        } catch (e) {
+            // 把真实失败原因带出来（网络/额度/返回空等），别只甩"没配置人设"误导
+            if (manual) setError(`问 ${character.name || "TA"} 没回应：${briefError(e)}`);
         }
     }, [applySkipVote, onToast, takeUserActions]);
 
@@ -377,6 +393,7 @@ export default function ListenTogetherLayer({
         setBusyAll(true);
         setError(null);
         let failed = 0;
+        let lastErr: unknown = null;
         for (const character of chars) {
             if (!mountedRef.current) break;
             try {
@@ -384,13 +401,14 @@ export default function ListenTogetherLayer({
                 if (!text) continue; // 两次都判复读：宁可不发
                 pushBubble(character, text, "comment");
                 recordHistory(character, "comment", text);
-            } catch {
+            } catch (e) {
                 failed += 1;
+                lastErr = e;
             }
         }
         setBusyAll(false);
         if (failed === chars.length) {
-            setError("角色们都没回应，可能还没配置 API 或人设");
+            setError(`都没回应：${briefError(lastErr)}`);
         } else if (failed > 0) {
             onToast?.(`${failed} 位角色没回应`);
         }
