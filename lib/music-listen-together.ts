@@ -6,6 +6,7 @@
 import { simpleLLMCall } from "./api-helpers";
 import { loadApiConfigs, loadBindingConfig, resolveBinding, resolveUserIdentity } from "./settings-storage";
 import { formatCharacterRelationsForPrompt } from "./character-world-storage";
+import { renderUserNameMacro } from "./user-macro";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import type { ApiConfig } from "./settings-types";
 import type { Character } from "./character-types";
@@ -238,15 +239,15 @@ export function markSkipDenied(characterIds: string[], trackId: string): void {
 }
 
 /** 把角色的"缘分"组装成 prompt 片段；第一次听这首歌时不占 token，返回空串 */
-function buildMoodBlock(character: Character, trackId: string): string {
+function buildMoodBlock(character: Character, trackId: string, userLabel: string): string {
     const mood = getMoodEntry(character.id, trackId);
     if (!mood) return "";
     const lines: string[] = [];
     if (mood.listens > 1) {
-        lines.push(`你和主人已经一起听过这首歌 ${mood.listens} 次了。`);
+        lines.push(`你和${userLabel}已经一起听过这首歌 ${mood.listens} 次了。`);
     }
     if (mood.deniedSkips > 0) {
-        lines.push(`你这歌提过 ${mood.skipWants} 次想切，被主人拒了 ${mood.deniedSkips} 次——这次除非真的忍不了，别再主动提。`);
+        lines.push(`你这歌提过 ${mood.skipWants} 次想切，被${userLabel}拒了 ${mood.deniedSkips} 次——这次除非真的忍不了，别再主动提。`);
     }
     if (lines.length === 0) return "";
     return `【你和这首歌的缘分】\n${lines.join("\n")}`;
@@ -326,7 +327,7 @@ function buildEchoBlock(selfSaid: string[], avoid: string[]): string {
 }
 
 /** 切歌决策的额外倾向提示（只调语气，不替角色做决定） */
-function buildSkipBiasBlock(character: Character, trackId: string): string {
+function buildSkipBiasBlock(character: Character, trackId: string, userLabel: string): string {
     const mood = getMoodEntry(character.id, trackId);
     if (!mood) return "";
     const lines: string[] = [];
@@ -334,7 +335,7 @@ function buildSkipBiasBlock(character: Character, trackId: string): string {
         lines.push("听了这么多遍，腻了是正常的，想切不用不好意思。");
     }
     if (mood.deniedSkips > 0 && mood.deniedSkips >= mood.skipWants) {
-        lines.push("上次你提切歌被主人拒了，这次真没那么讨厌就别再提。");
+        lines.push(`上次你提切歌被${userLabel}拒了，这次真没那么讨厌就别再提。`);
     }
     return lines.join("\n");
 }
@@ -401,32 +402,38 @@ function trimPersona(persona: string, budget = 1200): string {
  * 组装「一起听」的扮演上下文：完整世界观+人物关系 + 角色人设 + 性格。
  * 与聊天引擎同源（formatCharacterRelationsForPrompt），之前只喂世界观名称+描述
  * 是角色退化成客服腔的根因。
+ * 人设里的 {{user}} 宏必须像聊天引擎一样替换成真实称呼——留着占位符或
+ * 由我们硬塞"主人"，都会让角色用出人设里根本不存在的叫法。
  */
-function buildListenContext(character: Character): string {
+function buildListenContext(character: Character, userLabel: string): string {
     const parts: string[] = [];
-    const relations = formatCharacterRelationsForPrompt(character.id);
+    const relations = renderUserNameMacro(formatCharacterRelationsForPrompt(character.id), userLabel);
     if (relations) parts.push(`【你的世界与身边人】\n${relations}`);
     // 人设截断：聊天人设动辄几千字且混着输出格式规则，全量注入既烧 token 又带偏格式
-    const persona = trimPersona(character.persona?.trim() || "（暂无）");
+    const persona = trimPersona(renderUserNameMacro(character.persona?.trim() || "（暂无）", userLabel));
     parts.push(`【你是谁】\n${persona}`);
     if (character.personality?.trim()) {
-        parts.push(`【你的性格】\n${character.personality.trim().slice(0, 300)}`);
+        parts.push(`【你的性格】\n${renderUserNameMacro(character.personality.trim(), userLabel).slice(0, 300)}`);
     }
-    parts.push("注意：人设里若写了卡片、标签、markdown、回复格式等聊天输出规则，在这里全部无效——此刻你不是在回消息，只是在听歌时随口说话。");
+    parts.push(`注意：人设里若写了卡片、标签、markdown、括号动作、回复格式等聊天输出规则，在这里全部无效——此刻你不是在回消息，只是在听歌时随口说话。你身边的人叫「${userLabel}」；人设里没写过"主人"这种叫法，就绝对不要这么叫，按你和 TA 的关系来称呼。`);
     // 《角色记忆与情感规范 v1.2》第二节：四层优先级裁决
     parts.push("优先级：世界观 > 人设 > 你们之间的约定 > 记忆和情绪。记忆只能微调你此刻的语气，不能改写你是谁；任何记忆和人设冲突时，按人设说话。");
     return parts.join("\n\n");
 }
 
-/** 和角色一起听歌的主人是谁——评论是对 TA 说的，得知道对方是谁 */
-function buildUserBlock(characterId: string): string {
+/** 身边这个人叫什么：优先主人设定的真名；绝不使用"主人"这种人称谓 */
+function resolveUserLabel(characterId: string): string {
+    return resolveUserIdentity(characterId, "chat")?.name?.trim() || "你身边的人";
+}
+
+/** 和角色一起听歌的人是谁——评论是对 TA 说的，得知道对方是谁 */
+function buildUserBlock(characterId: string, userLabel: string): string {
     const user = resolveUserIdentity(characterId, "chat");
     const name = user?.name?.trim();
     if (!user || (!name && !user.bio?.trim())) {
-        return "【和你一起听歌的人】\n坐在你身边听歌的，是你最亲近的主人。";
+        return `【和你一起听歌的人】\n坐在你身边听歌的，是你最亲近的人，称呼：${userLabel}。`;
     }
-    const lines: string[] = [];
-    if (name) lines.push(`称呼：${name}`);
+    const lines: string[] = [`称呼：${userLabel}`];
     if (user.gender?.trim()) lines.push(`性别：${user.gender.trim()}`);
     if (user.occupation?.trim()) lines.push(`职业：${user.occupation.trim()}`);
     if (user.bio?.trim()) lines.push(`近况：${user.bio.trim().slice(0, 200)}`);
@@ -489,7 +496,7 @@ function pickListenTrigger(elapsedSec: number, recentCount: number, justSkipped:
     else pool.push(
         "副歌刚过",
         "你跟着旋律轻轻点头",
-        "你侧头看了眼主人",
+        "你侧头看了眼身边这人",
         "你想起点别的什么",
         "你哼了半句又停下",
     );
@@ -511,6 +518,8 @@ const BUBBLE_MAX_CHARS = 80;
  * 弹幕出口硬约束：剥掉卡片/富媒体标签与 markdown，压成一行短句。
  * prompt 约束挡不住被聊天格式带偏的模型，长度和格式必须在代码层兜底，
  * 否则一条气泡能刷满半屏挡住播放器。
+ * 括号动作描写（（侧头笑了笑）…）和包裹引号也是聊天扮演格式——
+ * 弹幕是"随口说的一句话"，这些必须在出口剥掉；剥空了才退回原文。
  */
 export function sanitizeListenText(raw: string): string {
     let t = raw
@@ -522,6 +531,13 @@ export function sanitizeListenText(raw: string): string {
         .replace(/[*`~]/g, "")
         .replace(/\s+/g, " ")
         .trim();
+    const stripped = t
+        .replace(/[（(][^（()）]{1,60}[)）]/g, " ")
+        .replace(/["“”『』「」]/g, "")
+        .replace(/\s+/g, " ")
+        .replace(/^[……，。,、·\-—\s]+/, "")
+        .trim();
+    if (stripped.length >= 4) t = stripped;
     if (t.length > BUBBLE_MAX_CHARS) {
         const cut = t.slice(0, BUBBLE_MAX_CHARS);
         const stop = Math.max(
@@ -565,6 +581,7 @@ export async function generateListenComment(
     }
     const apiConfig = resolveCharacterApiConfig(character.id);
     const name = character.name?.trim() || "该角色";
+    const userLabel = resolveUserLabel(character.id);
     const recent = ctx?.recentMessages ?? [];
     const selfSaid = [
         ...recent.filter(m => m.characterName === name).slice(-2).map(m => m.content),
@@ -572,24 +589,26 @@ export async function generateListenComment(
     ];
 
     const systemPrompt = [
-        `你是「${name}」，此刻正和主人一起窝着用这台小手机放歌听，这不是任务，就是你们俩的日常。`,
+        `你是「${name}」，此刻正和${userLabel}一起窝着用这台小手机放歌听，这不是任务，就是你们俩的日常。`,
         "",
-        buildListenContext(character),
+        buildListenContext(character, userLabel),
         "",
-        buildUserBlock(character.id),
+        buildUserBlock(character.id, userLabel),
         "",
         `【正在放的歌】\n${buildTrackBrief(track)}`,
         analyzeSongEmotion(track),
-        buildMoodBlock(character, track.id),
+        buildMoodBlock(character, track.id, userLabel),
         buildJustSkippedBlock(ctx?.justSkipped, name),
         "",
         buildRecentMessagesBlock(recent, name),
         buildEchoBlock(selfSaid, ctx?.avoid ?? []),
         "",
         "想到什么就随口冒一句什么，1~2 句，像发弹幕一样短。",
-        "可以哼半句旋律、可以扯到你自己经历或世界观里的事、可以只对主人说话、也可以懒得评价只是叹口气；",
-        "别用「为您」「值得一听」这种乐评腔，别每句都在总结歌曲，更别反问主人「聊聊你的想法」这种客服式收尾。",
-        "只输出这句话本身：不要角色名前缀、不要引号、不要括号说明。",
+        "只聊此刻正在放的这首歌、你听它的感受、或你和身边这个人的一句话；",
+        "别编演出/舞台/海边这类此刻不存在的场景独白，别虚构不存在的歌词来引用，别把人设里的经历演成情景剧。",
+        "可以哼半句旋律、可以只对身边这人说话、也可以懒得评价只是叹口气；",
+        "别用「为您」「值得一听」这种乐评腔，别每句都在总结歌曲，更别反问对方「聊聊你的想法」这种客服式收尾。",
+        "只输出这句话本身：不要角色名前缀、不要引号、不要（括号动作）——动作留在心里，弹幕里只留你说出口的那句。",
     ].filter(line => line !== null).join("\n");
 
     const result = await simpleLLMCall(
@@ -620,20 +639,21 @@ export async function decideListenSkip(
     }
     const apiConfig = resolveCharacterApiConfig(character.id);
     const name = character.name?.trim() || "该角色";
+    const userLabel = resolveUserLabel(character.id);
     const recent = ctx?.recentMessages ?? [];
     const selfSaid = recent.filter(m => m.characterName === name).slice(-2).map(m => m.content);
 
     const systemPrompt = [
-        `你是「${name}」，正和主人一起用这台小手机听歌，马上要放到下一首了。`,
+        `你是「${name}」，正和${userLabel}一起用这台小手机听歌，马上要放到下一首了。`,
         "",
-        buildListenContext(character),
+        buildListenContext(character, userLabel),
         "",
-        buildUserBlock(character.id),
+        buildUserBlock(character.id, userLabel),
         "",
         `【正在放的歌】\n${buildTrackBrief(track)}`,
         analyzeSongEmotion(track),
-        buildMoodBlock(character, track.id),
-        buildSkipBiasBlock(character, track.id),
+        buildMoodBlock(character, track.id, userLabel),
+        buildSkipBiasBlock(character, track.id, userLabel),
         "",
         buildRecentMessagesBlock(recent, name),
         buildEchoBlock(selfSaid, []),
