@@ -5433,7 +5433,9 @@
 
 .lt-live-bar {
     position: absolute;
-    top: calc(52px + env(safe-area-inset-top, 0px));
+    /* 贴在播放器头部（歌名/歌手/右上图标行）下方，不再与标题行重叠；
+       播放器头部实际占位 = --page-header-safe-top + ~56px 内容高 */
+    top: calc(var(--page-header-safe-top, 48px) + 62px);
     left: 8px;
     display: inline-flex;
     align-items: center;
@@ -5497,7 +5499,7 @@
 
 .lt-layer-error {
     position: absolute;
-    top: calc(96px + env(safe-area-inset-top, 0px));
+    top: calc(var(--page-header-safe-top, 48px) + 100px);
     left: 8px;
     right: 8px;
     padding: 8px 12px;
